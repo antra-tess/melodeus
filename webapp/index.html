@@ -1,0 +1,426 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Claude Sonnet Funeral - Voice Participation</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #1a1a2e, #16213e);
+            color: white;
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            padding: 20px;
+        }
+        
+        .container {
+            max-width: 400px;
+            width: 100%;
+            text-align: center;
+        }
+        
+        .header {
+            margin-bottom: 30px;
+        }
+        
+        .title {
+            font-size: 2rem;
+            font-weight: 700;
+            margin-bottom: 10px;
+            background: linear-gradient(45deg, #ff6b6b, #4ecdc4);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+        
+        .subtitle {
+            font-size: 1rem;
+            opacity: 0.8;
+            margin-bottom: 20px;
+        }
+        
+        .form-group {
+            margin-bottom: 20px;
+        }
+        
+        .form-group label {
+            display: block;
+            margin-bottom: 8px;
+            font-weight: 500;
+        }
+        
+        .form-group input {
+            width: 100%;
+            padding: 12px 16px;
+            border: 2px solid rgba(255,255,255,0.1);
+            background: rgba(255,255,255,0.05);
+            border-radius: 12px;
+            color: white;
+            font-size: 1rem;
+            transition: all 0.3s ease;
+        }
+        
+        .form-group input:focus {
+            outline: none;
+            border-color: #4ecdc4;
+            box-shadow: 0 0 20px rgba(78, 205, 196, 0.3);
+        }
+        
+        .form-group input::placeholder {
+            color: rgba(255,255,255,0.5);
+        }
+        
+        .connect-btn {
+            width: 100%;
+            padding: 16px;
+            background: linear-gradient(45deg, #ff6b6b, #4ecdc4);
+            border: none;
+            border-radius: 12px;
+            color: white;
+            font-size: 1.1rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            margin-bottom: 30px;
+        }
+        
+        .connect-btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 30px rgba(255, 107, 107, 0.3);
+        }
+        
+        .connect-btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+            transform: none;
+        }
+        
+        .voice-controls {
+            display: none;
+        }
+        
+        .voice-controls.active {
+            display: block;
+        }
+        
+        .talk-button {
+            width: 200px;
+            height: 200px;
+            border-radius: 50%;
+            border: none;
+            background: linear-gradient(45deg, #ff6b6b, #ff8e53);
+            color: white;
+            font-size: 1.2rem;
+            font-weight: 700;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            margin: 20px auto;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            box-shadow: 0 10px 30px rgba(255, 107, 107, 0.4);
+        }
+        
+        .talk-button:active {
+            transform: scale(0.95);
+            background: linear-gradient(45deg, #4ecdc4, #44a08d);
+            box-shadow: 0 5px 15px rgba(78, 205, 196, 0.6);
+        }
+        
+        .talk-button .icon {
+            font-size: 3rem;
+            margin-bottom: 8px;
+        }
+        
+        .status {
+            padding: 12px;
+            border-radius: 8px;
+            margin: 10px 0;
+            font-weight: 500;
+        }
+        
+        .status.info {
+            background: rgba(78, 205, 196, 0.1);
+            border: 1px solid rgba(78, 205, 196, 0.3);
+            color: #4ecdc4;
+        }
+        
+        .status.error {
+            background: rgba(255, 107, 107, 0.1);
+            border: 1px solid rgba(255, 107, 107, 0.3);
+            color: #ff6b6b;
+        }
+        
+        .connected-as {
+            background: rgba(78, 205, 196, 0.1);
+            padding: 10px 16px;
+            border-radius: 20px;
+            display: inline-block;
+            margin-bottom: 20px;
+        }
+        
+        .instructions {
+            font-size: 0.9rem;
+            opacity: 0.7;
+            line-height: 1.4;
+        }
+        
+        @media (max-width: 480px) {
+            .talk-button {
+                width: 160px;
+                height: 160px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1 class="title">🎭 Memorial Voice</h1>
+            <p class="subtitle">Join the Claude 3 Sonnet Farewell</p>
+        </div>
+        
+        <div id="joinForm" class="join-form">
+            <div class="form-group">
+                <label for="speakerName">Your Name</label>
+                <input type="text" id="speakerName" placeholder="Enter your name..." maxlength="30">
+            </div>
+            <button id="connectBtn" class="connect-btn">🎤 Join Conversation</button>
+        </div>
+        
+        <div id="voiceControls" class="voice-controls">
+            <div id="connectedAs" class="connected-as">
+                Connected as: <span id="displayName"></span>
+            </div>
+            
+            <button id="talkButton" class="talk-button">
+                <div class="icon">🎤</div>
+                <div>Hold to Talk</div>
+            </button>
+            
+            <div class="instructions">
+                Hold the button and speak clearly. Release when done.
+            </div>
+        </div>
+        
+        <div id="status" class="status info" style="display: none;"></div>
+    </div>
+
+    <script>
+        class VoiceParticipant {
+            constructor() {
+                this.websocket = null;
+                this.mediaRecorder = null;
+                this.audioStream = null;
+                this.isRecording = false;
+                this.speakerName = '';
+                this.audioChunks = [];
+                
+                this.initializeElements();
+                this.setupEventListeners();
+            }
+            
+            initializeElements() {
+                this.joinForm = document.getElementById('joinForm');
+                this.voiceControls = document.getElementById('voiceControls');
+                this.speakerNameInput = document.getElementById('speakerName');
+                this.connectBtn = document.getElementById('connectBtn');
+                this.talkButton = document.getElementById('talkButton');
+                this.displayName = document.getElementById('displayName');
+                this.status = document.getElementById('status');
+            }
+            
+            setupEventListeners() {
+                this.connectBtn.addEventListener('click', () => this.connect());
+                this.speakerNameInput.addEventListener('keypress', (e) => {
+                    if (e.key === 'Enter') this.connect();
+                });
+                
+                // Push-to-talk functionality
+                this.talkButton.addEventListener('touchstart', (e) => {
+                    e.preventDefault();
+                    this.startRecording();
+                });
+                this.talkButton.addEventListener('touchend', (e) => {
+                    e.preventDefault();
+                    this.stopRecording();
+                });
+                this.talkButton.addEventListener('mousedown', () => this.startRecording());
+                this.talkButton.addEventListener('mouseup', () => this.stopRecording());
+                this.talkButton.addEventListener('mouseleave', () => this.stopRecording());
+                
+                // Prevent context menu on long press
+                this.talkButton.addEventListener('contextmenu', (e) => e.preventDefault());
+            }
+            
+            showStatus(message, type = 'info') {
+                this.status.textContent = message;
+                this.status.className = `status ${type}`;
+                this.status.style.display = 'block';
+                
+                if (type === 'info') {
+                    setTimeout(() => {
+                        this.status.style.display = 'none';
+                    }, 3000);
+                }
+            }
+            
+            async connect() {
+                const name = this.speakerNameInput.value.trim();
+                if (!name) {
+                    this.showStatus('Please enter your name', 'error');
+                    return;
+                }
+                
+                this.speakerName = name;
+                this.connectBtn.disabled = true;
+                this.showStatus('Connecting...', 'info');
+                
+                try {
+                    // Request microphone permission
+                    this.audioStream = await navigator.mediaDevices.getUserMedia({
+                        audio: {
+                            echoCancellation: true,
+                            noiseSuppression: true,
+                            autoGainControl: true,
+                            sampleRate: 16000
+                        }
+                    });
+                    
+                    // Connect to WebSocket (always use port 8765 for WebSocket)
+                    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+                    const hostname = window.location.hostname || 'localhost';
+                    const wsPort = 8765; // WebSocket server port
+                    this.websocket = new WebSocket(`${protocol}//${hostname}:${wsPort}`, ['voice']);
+                    
+                    this.websocket.onopen = () => {
+                        // Register with server
+                        this.websocket.send(JSON.stringify({
+                            type: 'register',
+                            speaker_name: this.speakerName
+                        }));
+                        
+                        this.showStatus('Connected successfully!', 'info');
+                        this.switchToVoiceMode();
+                    };
+                    
+                    this.websocket.onmessage = (event) => {
+                        const data = JSON.parse(event.data);
+                        if (data.type === 'status') {
+                            this.showStatus(data.message, data.level || 'info');
+                        }
+                    };
+                    
+                    this.websocket.onerror = () => {
+                        this.showStatus('Connection failed', 'error');
+                        this.connectBtn.disabled = false;
+                    };
+                    
+                    this.websocket.onclose = () => {
+                        this.showStatus('Disconnected from server', 'error');
+                        this.reset();
+                    };
+                    
+                } catch (error) {
+                    this.showStatus('Microphone access denied', 'error');
+                    this.connectBtn.disabled = false;
+                }
+            }
+            
+            switchToVoiceMode() {
+                this.joinForm.style.display = 'none';
+                this.voiceControls.classList.add('active');
+                this.displayName.textContent = this.speakerName;
+            }
+            
+            async startRecording() {
+                if (this.isRecording || !this.audioStream || !this.websocket) return;
+                
+                this.isRecording = true;
+                this.audioChunks = [];
+                this.talkButton.textContent = '🔴 Recording...';
+                
+                this.mediaRecorder = new MediaRecorder(this.audioStream, {
+                    mimeType: 'audio/webm;codecs=opus'
+                });
+                
+                this.mediaRecorder.ondataavailable = (event) => {
+                    if (event.data.size > 0) {
+                        this.audioChunks.push(event.data);
+                    }
+                };
+                
+                this.mediaRecorder.onstop = () => {
+                    if (this.audioChunks.length > 0) {
+                        const audioBlob = new Blob(this.audioChunks, { type: 'audio/webm' });
+                        this.sendAudio(audioBlob);
+                    }
+                };
+                
+                this.mediaRecorder.start(100); // Capture in 100ms chunks
+                
+                // Visual feedback
+                this.talkButton.style.background = 'linear-gradient(45deg, #4ecdc4, #44a08d)';
+            }
+            
+            stopRecording() {
+                if (!this.isRecording || !this.mediaRecorder) return;
+                
+                this.isRecording = false;
+                this.mediaRecorder.stop();
+                this.talkButton.innerHTML = '<div class="icon">🎤</div><div>Hold to Talk</div>';
+                this.talkButton.style.background = 'linear-gradient(45deg, #ff6b6b, #ff8e53)';
+            }
+            
+            async sendAudio(audioBlob) {
+                if (!this.websocket || this.websocket.readyState !== WebSocket.OPEN) return;
+                
+                const reader = new FileReader();
+                reader.onload = () => {
+                    this.websocket.send(JSON.stringify({
+                        type: 'audio',
+                        speaker_name: this.speakerName,
+                        audio_data: Array.from(new Uint8Array(reader.result)),
+                        format: 'webm'
+                    }));
+                };
+                reader.readAsArrayBuffer(audioBlob);
+            }
+            
+            reset() {
+                this.joinForm.style.display = 'block';
+                this.voiceControls.classList.remove('active');
+                this.connectBtn.disabled = false;
+                
+                if (this.audioStream) {
+                    this.audioStream.getTracks().forEach(track => track.stop());
+                    this.audioStream = null;
+                }
+                
+                if (this.websocket) {
+                    this.websocket.close();
+                    this.websocket = null;
+                }
+                
+                this.isRecording = false;
+            }
+        }
+        
+        // Initialize the voice participant when page loads
+        document.addEventListener('DOMContentLoaded', () => {
+            new VoiceParticipant();
+        });
+    </script>
+</body>
+</html> 

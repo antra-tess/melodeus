@@ -28,9 +28,11 @@ class ConversationState:
     is_processing_llm: bool = False
     is_speaking: bool = False
     last_utterance_time: Optional[datetime] = None
-    utterance_buffer: List[str] = field(default_factory=list)
-    conversation_history: List[Dict[str, str]] = field(default_factory=list)
+    utterance_buffer: List[Dict[str, str]] = field(default_factory=list)  # Now stores {"text": str, "speaker": str}
+    conversation_history: List[Dict[str, str]] = field(default_factory=list)  # Now includes "speaker" field
     current_speaker: Optional[int] = None
+    current_speaker_name: Optional[str] = None
+    connected_speakers: Dict[str, Dict[str, Any]] = field(default_factory=dict)  # Track all connected speakers
 
 class UnifiedVoiceConversation:
     """Unified voice conversation system with YAML configuration."""
@@ -93,17 +95,21 @@ class UnifiedVoiceConversation:
         
         print(f"📝 Conversation logging to: {self.conversation_log_file}")
     
-    def _log_conversation_turn(self, role: str, content: str):
+    def _log_conversation_turn(self, role: str, content: str, speaker_name: str = None):
         """Log a conversation turn in history file format.
         
         Args:
             role: 'user' or 'assistant'
             content: The message content
+            speaker_name: Optional speaker name (for user messages)
         """
         try:
             # Determine participant name based on role
             if role == "user":
-                participant = "H"
+                if speaker_name and speaker_name != "User":
+                    participant = speaker_name
+                else:
+                    participant = "H"
             else:  # assistant
                 # Use the AI participant name from prefill config if available
                 participant = "Claude"
@@ -470,9 +476,11 @@ class UnifiedVoiceConversation:
                 asyncio.create_task(self._force_process_buffer())
         
         # Add to utterance buffer
-        self.state.utterance_buffer.append(result.text)
+        speaker_name = result.speaker_name or f"Speaker_{result.speaker_id}" if result.speaker_id is not None else "Unknown"
+        self.state.utterance_buffer.append({"text": result.text, "speaker": speaker_name})
         self.state.last_utterance_time = result.timestamp
         self.state.current_speaker = result.speaker_id
+        self.state.current_speaker_name = speaker_name
         
         print(f"📝 Added to buffer: '{result.text}' at {result.timestamp}")
         print(f"📊 Buffer size: {len(self.state.utterance_buffer)}, Last time: {self.state.last_utterance_time}")
@@ -553,7 +561,7 @@ class UnifiedVoiceConversation:
                 now = datetime.now()
                 if (now - last_debug_time).total_seconds() >= 5.0:
                     if self.state.utterance_buffer and self.state.last_utterance_time:
-                        combined_transcript = " ".join(self.state.utterance_buffer).strip()
+                        combined_transcript = " ".join(msg['text'] for msg in self.state.utterance_buffer).strip()
                         word_count = len(combined_transcript.split()) if combined_transcript else 0
                         time_since_speech = now - self.state.last_utterance_time
                         
@@ -579,14 +587,14 @@ class UnifiedVoiceConversation:
                         
                         if skip_reason:
                             print(f"⏸️ Skipping utterance buffer due to: {', '.join(skip_reason)}")
-                            print(f"   Buffer: '{' '.join(self.state.utterance_buffer)}'")
+                            print(f"   Buffer: '{' '.join(msg['text'] for msg in self.state.utterance_buffer)}'")
                     continue
                 
                 # Calculate time since last speech
                 time_since_speech = datetime.now() - self.state.last_utterance_time
                 
                 # Get combined transcript
-                combined_transcript = " ".join(self.state.utterance_buffer).strip()
+                combined_transcript = " ".join(msg['text'] for msg in self.state.utterance_buffer).strip()
                 word_count = len(combined_transcript.split()) if combined_transcript else 0
                 
                 # Decision logic for LLM submission
@@ -606,10 +614,17 @@ class UnifiedVoiceConversation:
                     print(f"🧠 Submitting to LLM: {reason}")
                     print(f"📝 Input: {combined_transcript}")
                     
+                    # Determine primary speaker from buffer
+                    speakers = [msg['speaker'] for msg in self.state.utterance_buffer]
+                    primary_speaker = max(set(speakers), key=speakers.count) if speakers else "Unknown"
+                    
+                    if len(set(speakers)) > 1:
+                        print(f"👥 Multiple speakers detected: {set(speakers)}, primary: {primary_speaker}")
+                    
                     if self.config.development.enable_debug_mode:
                         self.logger.debug(f"LLM submission triggered: {reason}")
                     
-                    await self._process_with_llm(combined_transcript)
+                    await self._process_with_llm(combined_transcript, primary_speaker)
                     
                     # Clear buffer and reset timing
                     self.state.utterance_buffer.clear()
@@ -649,7 +664,7 @@ class UnifiedVoiceConversation:
         
         return False
     
-    async def _process_with_llm(self, user_input: str):
+    async def _process_with_llm(self, user_input: str, speaker_name: str = "User"):
         """Process user input with LLM and speak response."""
         if self.state.is_processing_llm:
             print(f"⚠️ Already processing LLM, skipping: {user_input}")
@@ -657,23 +672,36 @@ class UnifiedVoiceConversation:
         
         try:
             self.state.is_processing_llm = True
-            print(f"🔄 Starting LLM processing for: '{user_input}'")
+            print(f"🔄 Starting LLM processing for: '{user_input}' (from {speaker_name})")
             
-            # Add to conversation history
+            # Add to conversation history with speaker information
             self.state.conversation_history.append({
                 "role": "user",
-                "content": user_input
+                "content": user_input,
+                "speaker": speaker_name
             })
             
             # Log conversation turn
-            self._log_conversation_turn("user", user_input)
+            self._log_conversation_turn("user", user_input, speaker_name)
             
             print("🤖 Getting LLM response...")
             
-            # Prepare messages
-            messages = [
-                {"role": "system", "content": self.config.conversation.system_prompt}
-            ] + self.state.conversation_history[-200:]  # Keep last 200 exchanges
+            # Prepare messages with speaker-aware formatting
+            system_prompt = self.config.conversation.system_prompt
+            if any('speaker' in msg for msg in self.state.conversation_history):
+                system_prompt += "\n\nNote: This is a multi-speaker conversation. Speaker names will be indicated."
+            
+            messages = [{"role": "system", "content": system_prompt}]
+            
+            # Format conversation history with speaker information
+            for msg in self.state.conversation_history[-200:]:  # Keep last 200 exchanges
+                content = msg["content"]
+                if msg["role"] == "user" and "speaker" in msg and msg["speaker"] not in ["User", "H"]:
+                    content = f"[{msg['speaker']}]: {content}"
+                messages.append({
+                    "role": msg["role"],
+                    "content": content
+                })
             
             # Stream LLM response to TTS
             await self._stream_llm_to_tts(messages)
@@ -930,11 +958,15 @@ class UnifiedVoiceConversation:
             return
             
         # Get combined transcript
-        combined_transcript = " ".join(self.state.utterance_buffer).strip()
+        combined_transcript = " ".join(msg['text'] for msg in self.state.utterance_buffer).strip()
         
         if combined_transcript:
-            print(f"🚀 Force processing buffer: '{combined_transcript}'")
-            await self._process_with_llm(combined_transcript)
+            # Determine primary speaker from buffer
+            speakers = [msg['speaker'] for msg in self.state.utterance_buffer]
+            primary_speaker = max(set(speakers), key=speakers.count) if speakers else "Unknown"
+            
+            print(f"🚀 Force processing buffer: '{combined_transcript}' (from {primary_speaker})")
+            await self._process_with_llm(combined_transcript, primary_speaker)
             
             # Clear buffer and reset timing
             self.state.utterance_buffer.clear()
