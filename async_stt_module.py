@@ -5,7 +5,6 @@ Provides callback-based speech recognition with speaker identification.
 """
 
 import asyncio
-import pyaudio
 import time
 import json
 import numpy as np
@@ -25,24 +24,44 @@ except ImportError:
     print("❌ TitaNet voice fingerprinting not available (requires nemo_toolkit)")
     print("💡 Install with: pip install 'nemo_toolkit[asr]'")
 
+# Try to use mel-aec first, fall back to pyaudio if not available
 try:
-    from improved_echo_cancellation import SimpleEchoCancellationProcessor
-    from debug_echo_cancellation import DebugEchoCancellationProcessor
-    from advanced_echo_cancellation import AdaptiveEchoCancellationProcessor
-    from improved_aec_processor import ImprovedEchoCancellationProcessor
-    ECHO_CANCELLATION_AVAILABLE = True
-    print("✅ Echo cancellation available")
+    from mel_aec_adapter import PyAudio as MelAecAudio, paInt16
+    print("✅ Using mel-aec for audio I/O with integrated AEC")
+    USING_MEL_AEC = True
 except ImportError:
-    ECHO_CANCELLATION_AVAILABLE = False
-    print("❌ Echo cancellation not available")
-    print("💡 Install with: pip install speexdsp")
+    import pyaudio
+    from pyaudio import paInt16
+    PyAudio = pyaudio.PyAudio
+    print("⚠️  Using PyAudio (mel-aec not available)")
+    USING_MEL_AEC = False
+
+# Legacy echo cancellation imports (only used if mel-aec is not available)
+if not USING_MEL_AEC:
+    try:
+        from improved_echo_cancellation import SimpleEchoCancellationProcessor
+        from debug_echo_cancellation import DebugEchoCancellationProcessor
+        from advanced_echo_cancellation import AdaptiveEchoCancellationProcessor
+        from improved_aec_processor import ImprovedEchoCancellationProcessor
+        ECHO_CANCELLATION_AVAILABLE = True
+        print("✅ Legacy echo cancellation available")
+    except ImportError:
+        ECHO_CANCELLATION_AVAILABLE = False
+        print("❌ Legacy echo cancellation not available")
+        print("💡 Install with: pip install speexdsp")
+else:
+    # mel-aec has built-in AEC
+    ECHO_CANCELLATION_AVAILABLE = False  # Disable legacy AEC
 
 def find_input_device_by_name(device_name: str) -> Optional[int]:
     """Find audio input device index by name (partial match)."""
     if not device_name:
         return None
         
-    p = pyaudio.PyAudio()
+    if USING_MEL_AEC:
+        p = MelAecAudio()
+    else:
+        p = pyaudio.PyAudio()
     try:
         device_name_lower = device_name.lower()
         
@@ -125,7 +144,10 @@ class AsyncSTTStreamer:
         self.connection_alive = False
         
         # Audio setup
-        self.p = pyaudio.PyAudio()
+        if USING_MEL_AEC:
+            self.p = MelAecAudio()
+        else:
+            self.p = pyaudio.PyAudio()
         
         # Deepgram client
         self.deepgram = DeepgramClient(config.api_key)
@@ -171,7 +193,8 @@ class AsyncSTTStreamer:
         
         # Echo cancellation (optional)
         self.echo_canceller = None
-        if ECHO_CANCELLATION_AVAILABLE and hasattr(config, 'enable_echo_cancellation') and config.enable_echo_cancellation:
+        # Only use legacy echo cancellation if not using mel-aec (which has built-in AEC)
+        if not USING_MEL_AEC and ECHO_CANCELLATION_AVAILABLE and hasattr(config, 'enable_echo_cancellation') and config.enable_echo_cancellation:
             try:
                 # Get AEC parameters from config or use defaults
                 frame_size = getattr(config, 'aec_frame_size', 256)
@@ -186,10 +209,12 @@ class AsyncSTTStreamer:
                     initial_delay_ms=delay_ms,
                     debug_level=1  # Basic debug info
                 )
-                print(f"🔊 Echo cancellation enabled")
+                print(f"🔊 Legacy echo cancellation enabled")
             except Exception as e:
                 print(f"⚠️  Echo cancellation failed to initialize: {e}")
                 self.echo_canceller = None
+        elif USING_MEL_AEC and hasattr(config, 'enable_echo_cancellation') and config.enable_echo_cancellation:
+            print(f"🔊 mel-aec built-in echo cancellation is active")
     
     def on(self, event_type: STTEventType, callback: Callable):
         """Register a callback for an event type."""
@@ -227,7 +252,7 @@ class AsyncSTTStreamer:
             
             # Create microphone stream
             stream_kwargs = {
-                'format': pyaudio.paInt16,
+                'format': paInt16,
                 'channels': self.config.channels,
                 'rate': self.config.sample_rate,
                 'input': True,

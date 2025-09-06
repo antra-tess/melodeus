@@ -24,7 +24,7 @@ class FlicBridge:
         
         # Map BD addresses to actions (in order from your test)
         self.button_map = {
-            '90:88:a9:50:65:83': {'action': 'force_interrupt'},                    # Button 1
+            '90:88:a9:50:65:83 ': {'action': 'force_interrupt'},                    # Button 1
             '90:88:a9:50:68:2c': {'action': 'trigger_speaker', 'speaker': 'Opus'},         # Button 2
             '90:88:a9:50:6b:32': {'action': 'trigger_speaker', 'speaker': 'Sonnet36'},       # Button 3
             '90:88:a9:50:67:2c': {'action': 'trigger_speaker', 'speaker': 'Sonnet37'},      # Button 4

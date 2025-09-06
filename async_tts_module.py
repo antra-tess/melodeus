@@ -9,7 +9,6 @@ import asyncio
 import websockets
 import json
 import base64
-import pyaudio
 import threading
 import queue
 import time
@@ -19,6 +18,18 @@ import difflib
 from typing import Optional, AsyncGenerator, Dict, Any, List, Tuple
 from dataclasses import dataclass, field
 from scipy import signal
+
+# Try to use mel-aec first, fall back to pyaudio if not available
+try:
+    from mel_aec_adapter import PyAudio as MelAecAudio, paInt16
+    print("✅ Using mel-aec for TTS audio output with interruption tracking")
+    USING_MEL_AEC = True
+except ImportError:
+    import pyaudio
+    from pyaudio import paInt16
+    PyAudio = pyaudio.PyAudio
+    print("⚠️  Using PyAudio for TTS (mel-aec not available)")
+    USING_MEL_AEC = False
 
 # Import Whisper TTS Tracker
 try:
@@ -91,7 +102,11 @@ class AsyncTTSStreamer:
         self.audio_task = None
         
         # Audio setup
-        self.p = pyaudio.PyAudio()
+        if USING_MEL_AEC:
+            self.p = MelAecAudio()
+            print("🎯 mel-aec: Precise playback position tracking enabled")
+        else:
+            self.p = pyaudio.PyAudio()
         self.stream = None
         
         # Control flags
@@ -979,6 +994,52 @@ class AsyncTTSStreamer:
         finally:
             await self._cleanup_stream()
     
+    def get_precise_playback_position(self) -> float:
+        """
+        Get precise playback position in seconds (only available with mel-aec).
+        
+        Returns:
+            Current playback position in seconds, or -1 if not available
+        """
+        if USING_MEL_AEC and self.stream and hasattr(self.stream, 'get_time'):
+            try:
+                return self.stream.get_time()
+            except:
+                pass
+        return -1.0
+    
+    def get_buffered_audio_duration(self) -> float:
+        """
+        Get duration of audio currently buffered for output (mel-aec only).
+        
+        Returns:
+            Buffered duration in seconds, or -1 if not available
+        """
+        if USING_MEL_AEC and self.stream and hasattr(self.stream, 'get_write_available'):
+            try:
+                # Estimate based on available write space
+                available_frames = self.stream.get_write_available()
+                buffered_frames = self.config.buffer_size * 4 - available_frames
+                return max(0, buffered_frames) / self.config.sample_rate
+            except:
+                pass
+        return -1.0
+    
+    def interrupt_with_position(self) -> Tuple[bool, float]:
+        """
+        Interrupt playback and get the exact position where it was interrupted.
+        Only works with mel-aec.
+        
+        Returns:
+            Tuple of (success, position_seconds)
+        """
+        if USING_MEL_AEC and self.is_playing:
+            position = self.get_precise_playback_position()
+            print(f"🎯 mel-aec: Interrupting at position {position:.3f}s")
+            return True, position
+        else:
+            # Fallback for PyAudio - no precise position
+            return True, -1.0
     
     async def stop(self):
         """Stop current TTS playback immediately and wait for complete shutdown."""
@@ -1196,7 +1257,7 @@ class AsyncTTSStreamer:
             # Open new stream
             try:
                 stream_kwargs = {
-                    'format': pyaudio.paInt16,
+                    'format': paInt16,
                     'channels': 1,
                     'rate': self.config.sample_rate,
                     'output': True,
@@ -1640,7 +1701,10 @@ def find_audio_device_by_name(device_name: str) -> Optional[int]:
     if not device_name:
         return None
         
-    p = pyaudio.PyAudio()
+    if USING_MEL_AEC:
+        p = MelAecAudio()
+    else:
+        p = pyaudio.PyAudio()
     try:
         device_name_lower = device_name.lower()
         
