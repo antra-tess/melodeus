@@ -195,7 +195,7 @@ class VoiceUIServer:
         
         # Stop TTS and clear audio queue
         if hasattr(self.conversation, 'tts'):
-            await self.conversation.tts.stop()
+            await self.conversation.tts.interrupt()
             
         # Mark current processing as interrupted if needed
         if hasattr(self.conversation.state, 'current_processing_turn') and self.conversation.state.current_processing_turn:
@@ -299,6 +299,9 @@ class VoiceUIServer:
         """Handle triggering a specific speaker to respond."""
         if not self.conversation:
             return
+
+        await self.conversation._get_llm_output(speaker)
+        return
             
         # Prevent duplicate triggers
         import time
@@ -322,7 +325,7 @@ class VoiceUIServer:
         if hasattr(self.conversation, 'tts') and self.conversation.tts.is_currently_playing():
             print("🚫 Cancelling previous TTS playback")
             # Stop TTS and get the spoken content
-            await self.conversation.tts.stop()
+            await self.conversation.tts.interrupt()
             interrupted = True
             
         # Check if LLM is processing
@@ -413,7 +416,7 @@ class VoiceUIServer:
         # Check if TTS is currently playing
         if hasattr(self.conversation, 'tts') and self.conversation.tts.is_currently_playing():
             print("🚫 Cancelling previous TTS playback")
-            await self.conversation.tts.stop()
+            await self.conversation.tts.interrupt()
             interrupted = True
             
         # Check if LLM is processing
@@ -577,7 +580,8 @@ class VoiceUIServer:
         ))
         
     async def broadcast_transcription(self, speaker: str, text: str, 
-                                    is_final: bool = False, is_interim: bool = False):
+                                    is_final: bool = False, is_interim: bool = False, is_edit: bool = False,
+                                    message_id = None):
         """Broadcast transcription update."""
         message_data = {
             "speaker": speaker,
@@ -589,15 +593,25 @@ class VoiceUIServer:
         
         # Add message ID for final messages so they can be edited/deleted
         if is_final and not is_interim:
-            message_data["message_id"] = str(uuid.uuid4())
-            
-        await self.broadcast(UIMessage(
-            type="transcription",
-            data=message_data
-        ))
+            message_data["message_id"] = str(uuid.uuid4()) if not message_id else message_id
         
-    async def broadcast_ai_stream(self, speaker: str, text: str, 
-                                 is_complete: bool = False, session_id: str = ""):
+        if is_edit:
+            # Broadcast the edit to all clients
+            update_data = {
+                "id": message_id,
+                "new_text": text,
+                "edited": True
+            }
+            await self.broadcast(UIMessage("message_edited", update_data))
+        else:
+            await self.broadcast(UIMessage(
+                type="transcription",
+                data=message_data
+            ))
+        
+    async def broadcast_ai_stream(self, speaker: str, text: str,
+                                 is_complete: bool = False, session_id: str = "",
+                                 message_id: str = None):
         """Broadcast AI response stream."""
         message_data = {
             "speaker": speaker,
@@ -606,11 +620,12 @@ class VoiceUIServer:
             "session_id": session_id,
             "timestamp": time.time()
         }
-        
+
         # Add message ID for completed messages so they can be edited/deleted
+        # Use provided message_id if available, otherwise generate UUID (fallback)
         if is_complete:
-            message_data["message_id"] = str(uuid.uuid4())
-            
+            message_data["message_id"] = message_id if message_id else str(uuid.uuid4())
+
         await self.broadcast(UIMessage(
             type="ai_stream",
             data=message_data
@@ -658,7 +673,7 @@ class VoiceUIServer:
                 timestamp = time.time()
                 
             turn_data = {
-                "id": f"msg_{i}",  # Unique message ID
+                "id": getattr(turn, 'id', None) or f"msg_{i}",  # Use turn.id if set, else fallback
                 "role": turn.role,
                 "content": turn.content,
                 "speaker_name": getattr(turn, 'speaker_name', None),
@@ -785,11 +800,12 @@ class VoiceUIServer:
             await self.conversation._on_utterance_complete(result)
         
         # Broadcast the transcription to all UI clients
-        await self.broadcast_transcription(
-            speaker=speaker_name,
-            text=text,
-            is_final=True
-        )
+        # don't need this because it's already broadcasted in on_utterance_complete
+        #await self.broadcast_transcription(
+        #    speaker=speaker_name,
+        #    text=text,
+        #    is_final=True
+        #)
     
     async def handle_toggle_interruptions(self, enabled: bool):
         """Handle toggling interruptions on/off."""

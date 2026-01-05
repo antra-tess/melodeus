@@ -15,6 +15,11 @@ from collections import deque
 from dataclasses import dataclass
 from typing import List, Dict, Optional, Tuple
 import logging
+from collections import defaultdict
+from mel_aec_audio import shared_sample_rate, _resample
+import wave
+#import wespeaker
+
 
 # Try to import NeMo
 try:
@@ -34,7 +39,6 @@ class WordTiming:
     start_time: float
     end_time: float
     confidence: float
-    utterance_start: float  # When the utterance started relative to audio stream
 
 @dataclass
 class VoiceSegment:
@@ -77,6 +81,7 @@ class TitaNetVoiceFingerprinter:
         self.sample_rate = 16000
         self.debug_save_audio = debug_save_audio
         self.debug_counter = 0
+        self.debug_dir = Path("testouput")
         
         # Configuration
         self.confidence_threshold = speakers_config.recognition.confidence_threshold
@@ -85,10 +90,7 @@ class TitaNetVoiceFingerprinter:
         self.max_fingerprints_per_speaker = 20  # Limit to prevent memory issues
         
         # Audio buffering for real-time processing
-        buffer_duration = 60.0  # seconds
-        self.buffer_size = int(buffer_duration * self.sample_rate)
-        self.audio_buffer = deque(maxlen=self.buffer_size)
-        self.buffer_timestamps = deque(maxlen=self.buffer_size)
+        self.audio_buffer = deque()
         
         # Speaker fingerprints: {speaker_profile_id: [TitaNetFingerprint, ...]}
         self.reference_fingerprints: Dict[str, List[TitaNetFingerprint]] = {}
@@ -105,7 +107,8 @@ class TitaNetVoiceFingerprinter:
         
         # Initialize TitaNet model
         self._load_titanet_model()
-        
+        #self._load_wespeaker_model()
+
         # Load existing fingerprints
         self._load_reference_fingerprints()
         
@@ -113,7 +116,11 @@ class TitaNetVoiceFingerprinter:
         self._load_reference_audio_files()
         
         print(f"🔊 [TITANET] System ready with {len(self.reference_fingerprints)} speaker profiles")
-        
+    
+    def _load_wespeaker_model(self):
+        self.wespeaker_model = wespeaker.load_model("english")
+        self.device = "cpu"
+
     def _load_titanet_model(self):
         """Load pre-trained TitaNet model."""
         print("🔊 [TITANET] Loading pre-trained TitaNet model...")
@@ -139,7 +146,7 @@ class TitaNetVoiceFingerprinter:
                 dummy_length = torch.tensor([16000]).to(device)
                 
                 with torch.no_grad():
-                    _, embeddings = self.titanet_model.forward(
+                    _, embeddings = self.titanet_model.get_normalized_embedding(
                         input_signal=dummy_audio,
                         input_signal_length=dummy_length
                     )
@@ -153,92 +160,138 @@ class TitaNetVoiceFingerprinter:
             print(f"❌ [TITANET] Failed to load TitaNet model: {e}")
             raise RuntimeError(f"Failed to load TitaNet model: {e}")
     
-    def add_audio_chunk(self, audio_data: np.ndarray, timestamp: float):
+    def add_audio_chunk(self, audio_data: np.ndarray, num_frames_before_this: int, sample_rate: int):
         """Add raw audio data to the circular buffer for later processing."""
         # Debug: Check chunk timing
-        chunk_duration = len(audio_data) / self.sample_rate
         # if len(self.audio_buffer) % (self.sample_rate * 10) == 0:  # Every 10 seconds of audio
         #     print(f"🔧 [BUFFER DEBUG] Chunk: {len(audio_data)} samples, {chunk_duration:.3f}s duration, timestamp: {timestamp:.3f}s")
-        
+        # can't resample here or it adds a few too many (or too few) and messes up timestamps
+        # so we resample later
         # Add samples to circular buffer with correct timestamps
-        for i, sample in enumerate(audio_data):
-            self.audio_buffer.append(sample)
-            # Calculate correct timestamp for this sample within the chunk
-            sample_timestamp = timestamp + (i / self.sample_rate)
-            self.buffer_timestamps.append(sample_timestamp)
+        self.audio_buffer.append((num_frames_before_this, audio_data))
+        chunk_len = len(audio_data)
+        # 3 min capacity
+        while len(audio_data)*len(self.audio_buffer)/float(sample_rate) > 360.0:
+            self.audio_buffer.popleft()
     
-    def process_transcript_words(self, word_timings: List[WordTiming], utterance_timestamp: float):
+
+    def _slice_audio(self, start_frames: int, end_frames: int, sample_rate: int) -> np.ndarray:
+        """Return samples between start_time and end_time."""
+        pieces = []
+        
+        for seg_start, samples in self.audio_buffer:
+            seg_end = seg_start + len(samples)
+            if seg_end <= start_frames:
+                continue
+            if seg_start >= end_frames:
+                break  # later segments start after the window
+            #print(f"Found segment {start_frames} {end_frames} {seg_start} {seg_end}")
+            clip_start = max(start_frames, seg_start)
+            clip_end = min(end_frames, seg_end)
+            if clip_start >= clip_end:
+                continue
+
+            offset_start = clip_start - seg_start
+            offset_end = clip_end - seg_start
+            #print(f"Offset start {offset_start} offset end {offset_end}")
+            pieces.append(samples[offset_start:offset_end])
+
+        return np.concatenate(pieces) if pieces else np.zeros(0, dtype=np.float32)
+
+    def process_transcript_words(self, word_timings: List[WordTiming], sample_rate: int):
         """
         Process word timings to extract speaker segments and update fingerprints.
         
         Args:
-            word_timings: List of words with timing and speaker info
-            utterance_timestamp: When the utterance started
+            word_timings: List of words witch timing and speaker info
         """
         if not word_timings:
             return
         
         # print(f"🔊 [TITANET] Processing {len(word_timings)} words for fingerprinting")
-        
         # Group words by speaker
-        speaker_segments = {}
-        for word_timing in word_timings:
-            speaker_id = word_timing.speaker_id
-            if speaker_id is None:
-                continue
-                
-            if speaker_id not in speaker_segments:
-                speaker_segments[speaker_id] = []
-            speaker_segments[speaker_id].append(word_timing)
         
+        speaker_audios = defaultdict(list)
+        start_times = {}
+        end_times = {}
+        duration = 0.0
+        words = defaultdict(list)
+        for word_timing in word_timings:
+            audio_pieces = []
+            word_audio = self._slice_audio(
+                    round(word_timing.start_time*sample_rate),
+                    round(word_timing.end_time*sample_rate),
+                    sample_rate)
+            print(f"Got word audio of len {len(word_audio)}")
+            if len(word_audio) > 0:
+                speaker_audios[word_timing.speaker_id].append(word_audio)
+                start_times[word_timing.speaker_id] = min(start_times.get(word_timing.speaker_id, word_timing.start_time), word_timing.start_time)
+                end_times[word_timing.speaker_id] = max(end_times.get(word_timing.speaker_id, word_timing.end_time), word_timing.end_time)
+                words[word_timing.speaker_id].append(word_timing.word)
         # Process each speaker segment
-        for speaker_id, words in speaker_segments.items():
+        for speaker_id, speaker_audio in speaker_audios.items():
             # Check if segment has sufficient duration (at least 0.5s)
-            if len(words) == 0:
-                continue
-            
-            segment_duration = words[-1].end_time - words[0].start_time
-            if len(words) < 2 and segment_duration < 0.5:
-                if self.verbose:
-                    print(f"⏭️ [TITANET] Skipping short segment: {len(words)} words, {segment_duration:.2f}s duration")
-                continue
-            
-            if self.verbose:
-                print(f"🎯 [TITANET] Processing segment: {len(words)} words, {segment_duration:.2f}s duration")
-            words_text = ' '.join([w.word for w in words])
-            if self.verbose:
-                print(f"   Text: '{words_text}' (Speaker {speaker_id})")
-                
-            # Extract audio segment for this speaker
-            voice_segment = self._extract_voice_segment(words, utterance_timestamp)
-            if voice_segment is None:
-                continue
-            
+            segment_duration = len(speaker_audio)/float(sample_rate)
+            # don't do more than 10 seconds
+            speaker_audio_trimmed = np.array(np.concatenate(speaker_audio)[:sample_rate*10])
+            # resample now to the sample rate that titanet wants
+            resampled_speaker_audio = _resample(speaker_audio_trimmed, sample_rate, self.sample_rate)
+            # Create voice segment
+            voice_segment = VoiceSegment(
+                audio_data=resampled_speaker_audio,
+                speaker_id=0,  # Dummy ID
+                start_time=start_times[speaker_id],
+                end_time=end_times[speaker_id],
+                words=words[speaker_id],
+                sample_rate=self.sample_rate
+            )
             # Create TitaNet embedding
             fingerprint = self._create_titanet_fingerprint(voice_segment)
+
             if fingerprint is None:
                 continue
             
-            # Try to match against known speakers
-            matched_speaker = self._match_speaker(fingerprint)
+            if self.debug_save_audio or True:
+                debug_filename = f"segment_{self.debug_counter:03d}_speaker_{voice_segment.speaker_id}_{len(resampled_speaker_audio)}samples.wav"
+                debug_path = self.debug_dir / debug_filename
+                self.debug_counter += 1
+                
+                # Save audio with proper format
+                import soundfile as sf
+                audio = np.clip(np.array(resampled_speaker_audio), -1.0, 1.0)
+                pcm16 = (audio * 32767).astype(np.int16)
+
+                with wave.open(str(debug_path), "wb") as wf:
+                    wf.setnchannels(1)                    # audio is mono
+                    wf.setsampwidth(2)                    # int16 -> 2 bytes
+                    wf.setframerate(self.sample_rate)
+                    wf.writeframes(pcm16.tobytes())
+                print(f"writing debug audio to {debug_filename}")
             
-            if matched_speaker:
-                if self.verbose:
-                    print(f"✅ [TITANET] Matched speaker {speaker_id} to {matched_speaker}")
-                self.session_speakers[speaker_id] = matched_speaker
+            # Try to match against known speakers
+            matched_id = self._match_speaker(fingerprint)
+            if matched_id:
+                print(f"✅ [TITANET] Matched speaker {speaker_id} to {matched_id}")
+                self.session_speakers[speaker_id] = matched_id
                 
                 # Add to reference fingerprints for continued learning
                 if self.learning_mode:
-                    self._add_reference_fingerprint(matched_speaker, fingerprint)
+                    self._add_reference_fingerprint(matched_id, fingerprint)
             else:
                 # Unknown speaker
                 if self.learning_mode:
-                    new_speaker_id = self._handle_unknown_speaker(speaker_id, fingerprint)
-                    print(f"👤 [TITANET] Learning new speaker: {new_speaker_id}")
+                    matched_id = self._handle_unknown_speaker(speaker_id, fingerprint)
+                    print(f"👤 [TITANET] Learning new speaker: {matched_id}")
                 else:
-                    if self.verbose:
-                        print(f"❓ [TITANET] Unknown speaker {speaker_id} (learning disabled)")
-    
+                    print(f"❓ [TITANET] Unknown speaker {speaker_id} (learning disabled)")
+            
+            # Unknown speaker - return friendly name
+            if matched_id.startswith("unknown_speaker_"):
+                count = matched_id.replace("unknown_speaker_", "")
+                return f"User {count}"
+            else:
+                return matched_id
+        return "User"
     def _extract_voice_segment(self, words: List[WordTiming], utterance_start: float) -> Optional[VoiceSegment]:
         """Extract audio segment from buffer based on word timings."""
         if not words:
@@ -357,12 +410,12 @@ class TitaNetVoiceFingerprinter:
             audio_data = voice_segment.audio_data
             
             # Ensure minimum length
-            min_samples = int(0.5 * self.sample_rate)  # 0.5 seconds minimum
-            if len(audio_data) < min_samples:
-                return None
-            
+            #min_samples = int(0.5 * self.sample_rate)  # 0.5 seconds minimum
+            #if len(audio_data) < min_samples:
+            #    return None
+            '''
             # Debug: Save original audio if enabled
-            if self.debug_save_audio:
+            if self.debug_save_audio or True:
                 self.debug_counter += 1
                 debug_filename = f"segment_{self.debug_counter:03d}_speaker_{voice_segment.speaker_id}_{len(audio_data)}samples.wav"
                 debug_path = self.debug_dir / debug_filename
@@ -385,9 +438,9 @@ class TitaNetVoiceFingerprinter:
                     print(f"🐛 [TITANET] Saved debug audio (npy): {debug_filename}")
                 except Exception as e:
                     print(f"🐛 [TITANET] Failed to save debug audio: {e}")
-            
+            '''
             # Normalize audio
-            audio_data = audio_data / (np.max(np.abs(audio_data)) + 1e-8)
+            #audio_data = audio_data / (np.max(np.abs(audio_data)) + 1e-8)
             
             # Convert to tensor
             audio_tensor = torch.tensor(audio_data).unsqueeze(0).to(self.device)
@@ -402,9 +455,13 @@ class TitaNetVoiceFingerprinter:
                     input_signal=audio_tensor,
                     input_signal_length=audio_length
                 )
+                embedding = embeddings[0].cpu().numpy()
+                #embeddings = self.wespeaker_model.extract_embedding_from_pcm(
+                #    audio_tensor, sample_rate=self.sample_rate
+                #)
                 
                 # Extract embedding vector
-                embedding = embeddings[0].cpu().numpy()
+                #embedding = embeddings.cpu().numpy()
             
             duration = len(audio_data) / self.sample_rate
             
@@ -447,13 +504,15 @@ class TitaNetVoiceFingerprinter:
             
             # Calculate similarities against all reference fingerprints for this speaker
             similarities = []
+            #print(f"similarities for speaker {speaker_id}:")
             for ref_fp in fingerprints:
                 similarity = self._cosine_similarity(fingerprint.embedding, ref_fp.embedding)
                 similarities.append(similarity)
+                #print(f"Similarity {similarity}")
             
             # Use best similarity for this speaker
             speaker_similarity = max(similarities) if similarities else 0.0
-            
+            print(f"for speaker {speaker_id} we got closest similarity {speaker_similarity}")
             # Get speaker name
             speaker_name = speaker_id
             for profile_id, profile in self.speakers_config.profiles.items():
@@ -467,6 +526,7 @@ class TitaNetVoiceFingerprinter:
             if speaker_similarity > best_similarity:
                 best_similarity = speaker_similarity
                 best_match = speaker_id
+        print(f"Best similarity {best_similarity} with speaker id {speaker_id}")
         
         if best_similarity >= self.confidence_threshold:
             # Get speaker name for display
@@ -484,6 +544,11 @@ class TitaNetVoiceFingerprinter:
                 print(f"❌ [TITANET] No match found (best similarity: {best_similarity:.3f} < threshold: {self.confidence_threshold:.3f})")
             return None
     
+    def _softmax(self, x: np.ndarray) -> np.ndarray:
+        x = x - np.max(x)                      # numerical stability
+        exp_x = np.exp(x)
+        return exp_x / (np.sum(exp_x) + 1e-12)
+
     def _cosine_similarity(self, a: np.ndarray, b: np.ndarray) -> float:
         """Calculate cosine similarity between two embeddings."""
         # Ensure same shape
@@ -551,7 +616,7 @@ class TitaNetVoiceFingerprinter:
         # Unknown speaker - return friendly name
         if speaker_id.startswith("unknown_speaker_"):
             count = speaker_id.replace("unknown_speaker_", "")
-            return f"Unknown Speaker {count}"
+            return f"User {count}"
         
         return speaker_id
     

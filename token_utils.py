@@ -125,17 +125,19 @@ def truncate_messages_to_fit(
             result.append(system_message)
             current_tokens = system_tokens
     
-    # Add messages from newest to oldest
+    # Add messages from newest to oldest, then restore chronological order
+    kept_messages = []
     for message in reversed(other_messages):
         message_tokens = count_message_tokens(message, model)
         if current_tokens + message_tokens <= max_tokens:
-            result.insert(len(result) if system_message and result else 0, message)
+            kept_messages.append(message)
             current_tokens += message_tokens
         else:
             # Can't fit any more messages
             break
     
-    return result
+    kept_messages.reverse()
+    return result + kept_messages
 
 def estimate_tokens(text: str, model: str = "gpt-4") -> int:
     """Quick token estimation for a text string.
