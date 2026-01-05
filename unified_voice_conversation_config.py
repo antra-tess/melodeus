@@ -1472,6 +1472,13 @@ class UnifiedVoiceConversation:
             stop_sequences.append("\n\nSystem:")
             stop_sequences.append("\n\nA:")
             
+            # Add User 1 through User 10
+            for i in range(1, 11):
+                stop_sequences.append(f"\n\nUser {i}:")
+            
+            # Add interrupted marker
+            stop_sequences.append("[Interrupted by user]")
+            
             # Remove duplicates while preserving order
             stop_sequences = list(dict.fromkeys(stop_sequences))
         # Log the request
@@ -2409,6 +2416,13 @@ class UnifiedVoiceConversation:
                 stop_sequences.append("\n\nSystem:")
                 stop_sequences.append("\n\nA:")
                 
+                # Add User 1 through User 10
+                for i in range(1, 11):
+                    stop_sequences.append(f"\n\nUser {i}:")
+                
+                # Add interrupted marker
+                stop_sequences.append("[Interrupted by user]")
+                
                 # Remove duplicates while preserving order
                 stop_sequences = list(dict.fromkeys(stop_sequences))
             
@@ -2926,6 +2940,13 @@ class UnifiedVoiceConversation:
                 stop_sequences.append("\n\nSystem:")
                 stop_sequences.append("\n\nA:")
                 
+                # Add User 1 through User 10
+                for i in range(1, 11):
+                    stop_sequences.append(f"\n\nUser {i}:")
+                
+                # Add interrupted marker
+                stop_sequences.append("[Interrupted by user]")
+                
                 # Remove duplicates while preserving order
                 stop_sequences = list(dict.fromkeys(stop_sequences))
                 print(f"🛑 Character using stop sequences: {stop_sequences}")
@@ -3099,9 +3120,10 @@ class UnifiedVoiceConversation:
                 stop_sequences = list(dict.fromkeys(stop_sequences))
                 print(f"🛑 Character using stop sequences: {stop_sequences}")
             
-            # For Bedrock, model names start with "anthropic."
+            # For Bedrock, model names start with "anthropic." or "us.anthropic." (cross-region)
             model_name = character_config.llm_model
-            if not model_name.startswith("anthropic."):
+            # Only prepend anthropic. if the model doesn't already have the right prefix
+            if not model_name.startswith("anthropic.") and not model_name.startswith("us.anthropic."):
                 model_name = f"anthropic.{model_name}"
             
             # Prepare parameters for Bedrock - remove None values as Bedrock doesn't like them
