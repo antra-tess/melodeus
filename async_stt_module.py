@@ -397,6 +397,9 @@ class AsyncSTTStreamer:
                 params = self._build_listen_params()
                 async with asyncio.TaskGroup() as tg: # this audio awaits for it to cancel/finish when we try to exit context
                     self.num_audio_frames_recieved = 0
+                    # Clear TitaNet audio buffer to match reset frame counter
+                    if self.voice_fingerprinter is not None:
+                        self.voice_fingerprinter.clear_audio_buffer()
                     async with self.deepgram.listen.v2.connect(
                         model="flux-general-en",
                         encoding="linear16",
