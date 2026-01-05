@@ -160,6 +160,11 @@ class TitaNetVoiceFingerprinter:
             print(f"❌ [TITANET] Failed to load TitaNet model: {e}")
             raise RuntimeError(f"Failed to load TitaNet model: {e}")
     
+    def clear_audio_buffer(self):
+        """Clear the audio buffer. Call this when STT connection resets."""
+        self.audio_buffer.clear()
+        print("🔄 [TITANET] Audio buffer cleared for new session")
+
     def add_audio_chunk(self, audio_data: np.ndarray, num_frames_before_this: int, sample_rate: int):
         """Add raw audio data to the circular buffer for later processing."""
         # Debug: Check chunk timing
@@ -620,6 +625,22 @@ class TitaNetVoiceFingerprinter:
         
         return speaker_id
     
+    def reset_all(self):
+        """Reset all fingerprints and speaker mappings. Returns count of cleared profiles."""
+        count = len(self.reference_fingerprints)
+        self.reference_fingerprints = {}
+        self.session_speakers = {}
+        self.unknown_speaker_count = 0
+        self.audio_buffer.clear()
+        # Delete the fingerprint file
+        try:
+            if Path(self.fingerprints_path).exists():
+                Path(self.fingerprints_path).unlink()
+        except Exception as e:
+            print(f"⚠️ [TITANET] Failed to delete fingerprint file: {e}")
+        print(f"🔄 [TITANET] Reset complete - cleared {count} speaker profiles")
+        return count
+
     def _save_reference_fingerprints(self):
         """Save reference fingerprints to disk."""
         try:
@@ -637,6 +658,17 @@ class TitaNetVoiceFingerprinter:
                 
                 total_fingerprints = sum(len(fps) for fps in self.reference_fingerprints.values())
                 print(f"📁 [TITANET] Loaded {total_fingerprints} fingerprints for {len(self.reference_fingerprints)} speakers from disk")
+
+                # Update unknown_speaker_count to avoid ID collisions after restart
+                for speaker_id in self.reference_fingerprints.keys():
+                    if speaker_id.startswith("unknown_speaker_"):
+                        try:
+                            num = int(speaker_id.replace("unknown_speaker_", ""))
+                            self.unknown_speaker_count = max(self.unknown_speaker_count, num)
+                        except ValueError:
+                            pass
+                if self.unknown_speaker_count > 0:
+                    print(f"🔢 [TITANET] Resuming unknown speaker count from {self.unknown_speaker_count}")
         except Exception as e:
             print(f"⚠️ [TITANET] Failed to load existing fingerprints: {e}")
             self.reference_fingerprints = {}
