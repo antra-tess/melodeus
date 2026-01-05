@@ -25,16 +25,15 @@
         }
         
         .speaker-card {
-            padding: 20px;
-            border-radius: 12px;
-            min-width: 180px;
+            padding: 12px 15px;
+            border-radius: 10px;
+            min-width: 140px;
             text-align: center;
             transition: all 0.3s ease;
             background: white;
             box-shadow: 0 2px 4px rgba(0,0,0,0.1);
             position: relative;
             overflow: visible;
-            min-height: 100px;
         }
         
         .speaker-card.active {
@@ -55,6 +54,65 @@
             color: #666;
         }
         
+        .speaker-card.next-speaker {
+            border: 3px solid #9C27B0;
+            box-shadow: 0 0 12px rgba(156, 39, 176, 0.4);
+        }
+        
+        .speaker-card.next-speaker::after {
+            content: "NEXT";
+            position: absolute;
+            top: -8px;
+            right: -8px;
+            background: #9C27B0;
+            color: white;
+            font-size: 10px;
+            font-weight: bold;
+            padding: 2px 6px;
+            border-radius: 4px;
+        }
+        
+        .card-buttons {
+            display: flex;
+            gap: 4px;
+            justify-content: center;
+            margin-top: 8px;
+        }
+        
+        .card-btn {
+            border: none;
+            border-radius: 4px;
+            padding: 4px 8px;
+            font-size: 10px;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        
+        .next-speaker-btn {
+            background: #E1BEE7;
+            color: #4A148C;
+        }
+        
+        .next-speaker-btn:hover {
+            background: #9C27B0;
+            color: white;
+        }
+        
+        .trigger-btn {
+            background: #BBDEFB;
+            color: #0D47A1;
+        }
+        
+        .trigger-btn:hover {
+            background: #2196F3;
+            color: white;
+        }
+        
+        .speaker-card.next-speaker .next-speaker-btn {
+            background: #9C27B0;
+            color: white;
+        }
+        
         @keyframes pulse {
             0% { opacity: 1; }
             50% { opacity: 0.8; }
@@ -62,8 +120,8 @@
         }
         
         .speaker-card h3 {
-            margin: 0 0 10px 0;
-            font-size: 20px;
+            margin: 0 0 6px 0;
+            font-size: 15px;
         }
         
         .status-indicator {
@@ -130,15 +188,6 @@
             background: #ccc;
             cursor: not-allowed;
             transform: none;
-        }
-        
-        button.trigger-model {
-            background: #9C27B0;
-        }
-        
-        button.trigger-model:hover {
-            background: #7B1FA2;
-            box-shadow: 0 2px 8px rgba(156, 39, 176, 0.3);
         }
         
         .prepared-statements {
@@ -463,14 +512,6 @@
             <option value="same_model">🔄 Same Model</option>
             <option value="director">🎭 Director</option>
         </select>
-        <label style="font-weight: 600; margin-left: 15px; margin-right: 8px;">Next AI:</label>
-        <select id="next-ai-speaker" onchange="setNextAiSpeaker(this.value)" style="padding: 8px; border: 1px solid #ddd; border-radius: 4px; min-width: 120px;">
-            <option value="">— Select —</option>
-        </select>
-    </div>
-    
-    <div class="controls" style="margin-top: 10px;" id="trigger-buttons">
-        <!-- Trigger buttons will be dynamically added here -->
     </div>
     
     <div class="controls" style="margin-top: 10px;">
@@ -657,9 +698,15 @@
         }
         
         function updateSpeakerStatus(data) {
+            // Helper to set card state while preserving next-speaker class
+            function setCardState(card, state) {
+                const isNextSpeaker = card.classList.contains('next-speaker');
+                card.className = `speaker-card ${state}${isNextSpeaker ? ' next-speaker' : ''}`;
+            }
+            
             // Reset all cards
             document.querySelectorAll('.speaker-card').forEach(card => {
-                card.className = 'speaker-card idle';
+                setCardState(card, 'idle');
                 card.querySelector('.status-text').textContent = 'Idle';
                 card.querySelector('.status-indicator').classList.remove('active');
             });
@@ -668,7 +715,7 @@
             if (data.thinking_sound && data.pending_speaker) {
                 const card = document.getElementById(`${data.pending_speaker.toLowerCase()}-card`);
                 if (card) {
-                    card.className = 'speaker-card thinking';
+                    setCardState(card, 'thinking');
                     card.querySelector('.status-text').textContent = 'Thinking...';
                 }
             }
@@ -677,7 +724,7 @@
             if (data.current_speaker) {
                 const card = document.getElementById(`${data.current_speaker.toLowerCase()}-card`);
                 if (card) {
-                    card.className = 'speaker-card active';
+                    setCardState(card, 'active');
                     card.querySelector('.status-text').textContent = data.is_speaking ? 'Speaking' : 'Processing';
                     if (data.is_speaking) {
                         card.querySelector('.status-indicator').classList.add('active');
@@ -689,7 +736,7 @@
             if (data.is_processing && data.pending_speaker && !data.thinking_sound) {
                 const card = document.getElementById(`${data.pending_speaker.toLowerCase()}-card`);
                 if (card && !data.current_speaker) {
-                    card.className = 'speaker-card thinking';
+                    setCardState(card, 'thinking');
                     card.querySelector('.status-text').textContent = 'Processing...';
                 }
             }
@@ -933,9 +980,16 @@
         
         function updateLastAiSpeaker(character) {
             lastAiSpeaker = character;
-            const selector = document.getElementById('next-ai-speaker');
-            if (selector) {
-                selector.value = character || '';
+            // Remove next-speaker class from all cards
+            document.querySelectorAll('.speaker-card').forEach(card => {
+                card.classList.remove('next-speaker');
+            });
+            // Add next-speaker class to the selected character's card
+            if (character) {
+                const card = document.getElementById(`${character.toLowerCase()}-card`);
+                if (card) {
+                    card.classList.add('next-speaker');
+                }
             }
         }
         
@@ -980,6 +1034,10 @@
                     <h3>${getCharacterEmoji(char.name)} ${char.name}</h3>
                     <span class="status-indicator"></span>
                     <span class="status-text">Idle</span>
+                    <div class="card-buttons">
+                        <button class="card-btn next-speaker-btn" onclick="event.stopPropagation(); setNextAiSpeaker('${char.name}')">▶ Next</button>
+                        <button class="card-btn trigger-btn" onclick="event.stopPropagation(); triggerModel('${char.name}')">⚡ Go</button>
+                    </div>
                 `;
                 
                 // Add prepared statements if available
@@ -1003,37 +1061,9 @@
                 statusPanel.appendChild(card);
             });
             
-            // Update trigger buttons
-            const triggerButtons = document.getElementById('trigger-buttons');
-            triggerButtons.innerHTML = '';
-            
-            availableCharacters.forEach((char, index) => {
-                const button = document.createElement('button');
-                button.className = 'trigger-model';
-                button.id = `trigger-${char.name.toLowerCase()}`;
-                button.onclick = () => triggerModel(char.name);
-                button.innerHTML = `<span>${getCharacterEmoji(char.name)}</span> Trigger ${char.name}`;
-                triggerButtons.appendChild(button);
-            });
-            
-            // Update the Next AI speaker dropdown
-            const nextAiSelector = document.getElementById('next-ai-speaker');
-            if (nextAiSelector) {
-                // Clear existing options except the first one
-                while (nextAiSelector.options.length > 1) {
-                    nextAiSelector.remove(1);
-                }
-                // Add characters
-                availableCharacters.forEach(char => {
-                    const option = document.createElement('option');
-                    option.value = char.name;
-                    option.textContent = char.name;
-                    nextAiSelector.appendChild(option);
-                });
-                // Set current value if we have one
-                if (lastAiSpeaker) {
-                    nextAiSelector.value = lastAiSpeaker;
-                }
+            // Highlight the current next AI speaker card
+            if (lastAiSpeaker) {
+                updateLastAiSpeaker(lastAiSpeaker);
             }
         }
         
