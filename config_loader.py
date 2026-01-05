@@ -72,7 +72,8 @@ class ConversationConfig:
     # Character configuration
     characters_config: Optional[Dict[str, Any]] = None
     director_config: Optional[Dict[str, Any]] = None
-    director_enabled: bool = False  # Default to disabled director
+    director_enabled: bool = False  # Default to disabled director (legacy)
+    director_mode: str = "off"  # "off", "same_model", or "director"
     
     # Echo cancellation settings
     enable_echo_cancellation: bool = False
@@ -445,6 +446,8 @@ class ConfigLoader:
             characters_config=characters_config,
             director_config=director_config,
             director_enabled=conversation_config_data.get('director_enabled', False),
+            director_mode=conversation_config_data.get('director_mode', 
+                "director" if conversation_config_data.get('director_enabled', False) else "off"),
             enable_echo_cancellation=conversation_config_data.get('enable_echo_cancellation', False),
             aec_frame_size=conversation_config_data.get('aec_frame_size', 256),
             aec_filter_length=conversation_config_data.get('aec_filter_length', 2048),

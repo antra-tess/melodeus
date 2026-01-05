@@ -22,7 +22,7 @@ class UIMessage:
 class VoiceUIServer:
     """WebSocket server for voice conversation UI."""
     
-    def __init__(self, conversation=None, host='localhost', port=8765):
+    def __init__(self, conversation=None, host='localhost', port=8795):
         self.conversation = conversation
         self.host = host
         self.port = port
@@ -33,9 +33,12 @@ class VoiceUIServer:
         # Track current state for new clients
         interruptions_enabled = False
         director_enabled = False
+        director_mode = "off"
         if conversation and hasattr(conversation, 'config'):
             interruptions_enabled = conversation.config.conversation.interruptions_enabled
             director_enabled = conversation.config.conversation.director_enabled
+            director_mode = getattr(conversation.config.conversation, 'director_mode', 
+                "director" if director_enabled else "off")
             
         self.current_state = {
             "current_speaker": None,
@@ -46,7 +49,9 @@ class VoiceUIServer:
             "stt_active": True,
             "conversation_active": False,
             "interruptions_enabled": interruptions_enabled,
-            "director_enabled": director_enabled
+            "director_enabled": director_enabled,
+            "director_mode": director_mode,  # "off", "same_model", "director"
+            "last_ai_speaker": None  # For same_model mode - which AI will respond next
         }
         
     async def start(self):
@@ -160,9 +165,19 @@ class VoiceUIServer:
                 await self.handle_toggle_interruptions(enabled)
                 
             elif msg_type == "toggle_director":
-                # Toggle director on/off
+                # Toggle director on/off (legacy)
                 enabled = data.get("enabled", False)
                 await self.handle_toggle_director(enabled)
+                
+            elif msg_type == "set_director_mode":
+                # Set director mode: "off", "same_model", "director"
+                mode = data.get("mode", "off")
+                await self.handle_set_director_mode(mode)
+            
+            elif msg_type == "set_last_ai_speaker":
+                # Set which AI character will respond next (for same_model mode)
+                character = data.get("character")
+                await self.handle_set_last_ai_speaker(character)
                 
             elif msg_type == "get_contexts":
                 # Get list of available contexts
@@ -783,6 +798,8 @@ class VoiceUIServer:
             timestamp: float = None
             confidence: float = 1.0
             raw_data: dict = None
+            message_id: str = None  # For edit tracking
+            is_edit: bool = False  # Whether this is editing an existing message
             
         # Create a result that looks like it came from STT
         result = SyntheticTranscriptionResult(
@@ -794,6 +811,11 @@ class VoiceUIServer:
             confidence=1.0,
             raw_data={}
         )
+        
+        # Add the speaker to detected_speakers so they become a stop sequence
+        if hasattr(self.conversation, 'detected_speakers') and speaker_name:
+            self.conversation.detected_speakers.add(speaker_name)
+            print(f"📝 Added '{speaker_name}' to detected speakers for stop sequences")
         
         # Process through the conversation system
         if hasattr(self.conversation, '_on_utterance_complete'):
@@ -888,20 +910,67 @@ class VoiceUIServer:
             await self.broadcast_error(str(e))
     
     async def handle_toggle_director(self, enabled: bool):
-        """Handle toggling director on/off."""
-        print(f"{'🎭' if enabled else '🚫'} Director {'enabled' if enabled else 'disabled'}")
+        """Handle toggling director on/off (legacy - prefer set_director_mode)."""
+        # Convert to new mode system
+        mode = "director" if enabled else "off"
+        await self.handle_set_director_mode(mode)
+    
+    async def handle_set_director_mode(self, mode: str):
+        """Handle setting director mode: 'off', 'same_model', or 'director'."""
+        if mode not in ("off", "same_model", "director"):
+            print(f"⚠️ Invalid director mode: {mode}")
+            return
+            
+        mode_icons = {"off": "🚫", "same_model": "🔄", "director": "🎭"}
+        mode_names = {"off": "Off", "same_model": "Same Model", "director": "Director"}
+        print(f"{mode_icons.get(mode, '❓')} Director mode: {mode_names.get(mode, mode)}")
         
         # Update our state
-        self.current_state["director_enabled"] = enabled
+        self.current_state["director_mode"] = mode
+        self.current_state["director_enabled"] = (mode != "off")  # Legacy compatibility
         
         # Update the conversation config if available
         if self.conversation and hasattr(self.conversation, 'config'):
-            self.conversation.config.conversation.director_enabled = enabled
+            self.conversation.config.conversation.director_mode = mode
+            self.conversation.config.conversation.director_enabled = (mode != "off")
         
         # Broadcast the update to all clients
         await self.broadcast(UIMessage(
+            type="director_mode_changed",
+            data={"mode": mode}
+        ))
+        
+        # Also broadcast legacy toggle for compatibility
+        await self.broadcast(UIMessage(
             type="director_toggled",
-            data={"enabled": enabled}
+            data={"enabled": mode != "off"}
+        ))
+        
+        # Also send a state sync to update UI
+        await self.broadcast(UIMessage(
+            type="state_sync",
+            data=self.current_state
+        ))
+    
+    async def handle_set_last_ai_speaker(self, character: Optional[str]):
+        """Set which AI character will respond next (used in same_model mode)."""
+        if character:
+            print(f"🎤 Next AI speaker set to: {character}")
+        else:
+            print("🎤 Next AI speaker cleared")
+        
+        # Update our state
+        self.current_state["last_ai_speaker"] = character
+        
+        # Update the conversation state if available
+        if self.conversation and hasattr(self.conversation, 'state'):
+            self.conversation.state.last_ai_speaker = character
+            self.conversation.state.next_speaker = character  # Also set next_speaker
+        
+        # Broadcast the update to all clients
+        await self.broadcast(UIMessage(
+            type="last_ai_speaker_changed",
+            data={"character": character}
         ))
         
         # Also send a state sync to update UI
