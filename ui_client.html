@@ -454,6 +454,9 @@
         <button id="stt-toggle" onclick="toggleSTT()">
             <span>⏸️</span> Pause STT
         </button>
+        <button id="reset-fingerprints" onclick="resetFingerprints()" title="Clear voice fingerprint database">
+            <span>🔄</span> Reset Voices
+        </button>
         <button id="interruptions-toggle" onclick="toggleInterruptions()">
             <span>🚫</span> Interruptions OFF
         </button>
@@ -871,13 +874,21 @@
         
         function toggleSTT() {
             if (ws && ws.readyState === WebSocket.OPEN) {
-                ws.send(JSON.stringify({ 
-                    type: 'stt_control', 
+                ws.send(JSON.stringify({
+                    type: 'stt_control',
                     data: { action: sttActive ? 'pause' : 'resume' }
                 }));
             }
         }
-        
+
+        function resetFingerprints() {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                if (confirm('Reset voice fingerprint database? All learned voices will be cleared.')) {
+                    ws.send(JSON.stringify({ type: 'reset_fingerprints' }));
+                }
+            }
+        }
+
         function toggleInterruptions() {
             if (ws && ws.readyState === WebSocket.OPEN) {
                 const newState = !interruptionsEnabled;

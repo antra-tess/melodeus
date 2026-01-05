@@ -147,7 +147,11 @@ class VoiceUIServer:
                 # Handle message deletion
                 msg_id = data.get("message_id")
                 await self.handle_delete_message(msg_id)
-                
+
+            elif msg_type == "reset_fingerprints":
+                # Reset voice fingerprint database
+                await self.handle_reset_fingerprints()
+
             elif msg_type == "send_text_message":
                 # Handle text message from UI
                 speaker_name = data.get("speaker_name", "USER")
@@ -721,6 +725,10 @@ class VoiceUIServer:
                     "edited": True
                 }
                 await self.broadcast(UIMessage("message_edited", update_data))
+
+                # Save immediately to persist the edit
+                if hasattr(self.conversation, '_save_conversation_state'):
+                    self.conversation._save_conversation_state()
             else:
                 await self.send_error(None, f"Invalid message ID: {msg_id}")
                 
@@ -751,9 +759,13 @@ class VoiceUIServer:
                 turn = self.conversation.state.conversation_history[index]
                 turn.status = "deleted"
                 print(f"🗑️ Deleted message {msg_id}")
-                
+
                 # Broadcast deletion to all clients
                 await self.broadcast(UIMessage("message_deleted", {"id": msg_id}))
+
+                # Save immediately to persist the deletion
+                if hasattr(self.conversation, '_save_conversation_state'):
+                    self.conversation._save_conversation_state()
             else:
                 print(f"⚠️ Index {index} out of range for history length {history_length}")
                 await self.send_error(None, f"Invalid message index: {index} (history has {history_length} messages)")
@@ -761,7 +773,28 @@ class VoiceUIServer:
         except Exception as e:
             self.logger.error(f"Error deleting message: {e}")
             await self.send_error(None, str(e))
-    
+
+    async def handle_reset_fingerprints(self):
+        """Reset voice fingerprint database."""
+        if not self.conversation:
+            return
+
+        try:
+            # Get the fingerprinter from STT module
+            if hasattr(self.conversation, 'stt') and hasattr(self.conversation.stt, 'voice_fingerprinter'):
+                fingerprinter = self.conversation.stt.voice_fingerprinter
+                if fingerprinter:
+                    count = fingerprinter.reset_all()
+                    print(f"🔄 Reset fingerprints via UI - cleared {count} profiles")
+                    await self.broadcast(UIMessage("fingerprints_reset", {"cleared_count": count}))
+                else:
+                    print("⚠️ No voice fingerprinter available")
+            else:
+                print("⚠️ Voice fingerprinting not enabled")
+        except Exception as e:
+            self.logger.error(f"Error resetting fingerprints: {e}")
+            await self.send_error(None, str(e))
+
     async def handle_text_message(self, speaker_name: str, text: str):
         """Handle text message from UI."""
         if not self.conversation or not text.strip():
