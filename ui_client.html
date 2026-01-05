@@ -544,7 +544,8 @@
         }
 
         function connect() {
-            ws = new WebSocket('ws://' + window.location.hostname + ':8765');
+            const hostname = window.location.hostname || 'localhost';
+            ws = new WebSocket('ws://' + hostname + ':8765');
             
             ws.onopen = () => {
                 console.log('Connected to voice system');

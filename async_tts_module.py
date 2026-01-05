@@ -435,41 +435,49 @@ class AsyncTTSStreamer:
     def extract_emotive_text(self, text: str) -> List[Tuple[str, bool]]:
         """
         Parse text to separate regular text from emotive text (in asterisks).
-        
+
         Args:
             text: Input text that may contain *emotive* parts
-            
+
         Returns:
             List of (text_chunk, is_emotive) tuples
+
+        Note:
+            Only matches single asterisks (*text*), not double (**bold**) which is
+            markdown formatting. The regex uses negative lookbehind/lookahead to
+            ensure we don't match asterisks that are part of ** pairs.
         """
         if not self.config.emotive_voice_id:
             # No emotive voice configured, return all as regular text
             return [(text, False)]
-        
+
         parts = []
         current_pos = 0
-        
-        # Find all *text* patterns
-        for match in re.finditer(r'\*([^*]+)\*', text):
+
+        # Find all *text* patterns, but NOT **text** (markdown bold)
+        # (?<!\*) = not preceded by another asterisk
+        # (?!\*) = not followed by another asterisk
+        # This ensures we match *single* but not **double**
+        for match in re.finditer(r'(?<!\*)\*([^*]+)\*(?!\*)', text):
             # Add regular text before the emotive part
             if match.start() > current_pos:
                 regular_text = text[current_pos:match.start()]
                 if regular_text.strip():
                     parts.append((regular_text, False))
-            
+
             # Add emotive text (content inside asterisks)
             emotive_text = match.group(1)
             if emotive_text.strip():
                 parts.append((emotive_text, True))
-            
+
             current_pos = match.end()
-        
+
         # Add remaining regular text
         if current_pos < len(text):
             remaining_text = text[current_pos:]
             if remaining_text.strip():
                 parts.append((remaining_text, False))
-        
+
         return parts if parts else [(text, False)]
 
 

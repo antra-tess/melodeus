@@ -43,6 +43,7 @@ class ConversationTurn:
     speaker_name: Optional[str] = None  # Identified speaker name from voice fingerprinting
     character: Optional[str] = None  # Character name for multi-character conversations
     metadata: Optional[Dict[str, Any]] = None  # Additional metadata for special handling
+    id: Optional[str] = None  # Unique message ID (msg_{index}), assigned when added to history
 
 @dataclass 
 class ConversationState:
@@ -517,11 +518,18 @@ class UnifiedVoiceConversation:
                 if prev_turn.metadata and prev_turn.metadata.get("message_id", None) == message_id:
                     editing_i = i
                     break
-            
+
 
         if editing_i:
+            # Keep the existing ID when editing
+            if not turn.id:
+                turn.id = f"msg_{editing_i}"
             self.state.conversation_history[editing_i] = turn
         else:
+            # Assign a proper ID based on the new index, unless already set
+            new_index = len(self.state.conversation_history)
+            if not turn.id:
+                turn.id = f"msg_{new_index}"
             self.state.conversation_history.append(turn)
         
         # Sync entire history TO context (don't use context.add_turn to avoid sync issues)
@@ -1473,13 +1481,13 @@ class UnifiedVoiceConversation:
         )
         return messages, character_config, stop_sequences, request_filename
 
-    def get_llm_text_stream(self, messages, character_config, request_timestamp, ui_session_id):      
+    def get_llm_text_stream(self, messages, character_config, request_timestamp, ui_session_id, pending_message_id: Optional[str] = None):
         if character_config.llm_provider == "openai":
-            return self._stream_character_openai_response(messages, character_config, request_timestamp, ui_session_id)
+            return self._stream_character_openai_response(messages, character_config, request_timestamp, ui_session_id, pending_message_id)
         elif character_config.llm_provider == "anthropic":
-            return self._stream_character_anthropic_response(messages, character_config, request_timestamp, ui_session_id)
+            return self._stream_character_anthropic_response(messages, character_config, request_timestamp, ui_session_id, pending_message_id)
         elif character_config.llm_provider == "bedrock":
-            return self._stream_character_bedrock_response(messages, character_config, request_timestamp, ui_session_id)
+            return self._stream_character_bedrock_response(messages, character_config, request_timestamp, ui_session_id, pending_message_id)
         else:
             raise ValueError(f"Unknown llm provider {character_config.llm_provider}")
     
@@ -1489,6 +1497,7 @@ class UnifiedVoiceConversation:
         character_config = None
         next_speaker = None
         original_config = None
+        pending_message_id = None  # Will be set before streaming starts
         request_timestamp = time.time()
         ui_session_id = f"session_{request_timestamp}"
         try:
@@ -1505,7 +1514,9 @@ class UnifiedVoiceConversation:
             original_config = self._set_character_voice(character_config)
             print("Got context")
             print(messages)
-            text_stream = self.get_llm_text_stream(messages, character_config, request_timestamp, ui_session_id)
+            # Pre-calculate message ID for UI edit/delete consistency
+            pending_message_id = f"msg_{len(self.state.conversation_history)}"
+            text_stream = self.get_llm_text_stream(messages, character_config, request_timestamp, ui_session_id, pending_message_id)
 
 
             async def stop_thinking_for_generation():
@@ -1567,7 +1578,8 @@ class UnifiedVoiceConversation:
                         content=assistant_response,
                         timestamp=datetime.now(),
                         status=status,
-                        character=next_speaker
+                        character=next_speaker,
+                        id=pending_message_id  # Use pre-calculated ID to match UI
                     )
                     self._add_turn_to_history(assistant_turn)
                     # For multi-character mode, log with character name prefix (no brackets)
@@ -1610,18 +1622,9 @@ class UnifiedVoiceConversation:
     async def _on_utterance_complete(self, result, skip_processing: bool = False):
         """Handle completed utterances from STT."""
         # Use speaker name if available from voice fingerprinting, otherwise fall back to speaker ID
-        
-        # Broadcast final transcription
         ui_speaker_name = result.speaker_name
-        if hasattr(self, 'ui_server'):
-            await self.ui_server.broadcast_transcription(
-                speaker=ui_speaker_name,
-                text=result.text,
-                is_final=True,
-                is_edit= result.is_edit,
-                message_id = result.message_id
-            )
-        
+
+        # Create the turn first, then add to history to get proper ID assignment
         user_turn = ConversationTurn(
             role="user",
             content=result.text,
@@ -1631,8 +1634,18 @@ class UnifiedVoiceConversation:
             speaker_name=result.speaker_name,
             metadata= {"message_id": result.message_id}
         )
-        self._add_turn_to_history(user_turn)
+        self._add_turn_to_history(user_turn)  # This assigns turn.id = "msg_{index}"
         self._log_conversation_turn("user", result.text, speaker_name=result.speaker_name)
+
+        # Broadcast AFTER adding to history so we use the correct msg_N ID
+        if hasattr(self, 'ui_server'):
+            await self.ui_server.broadcast_transcription(
+                speaker=ui_speaker_name,
+                text=result.text,
+                is_final=True,
+                is_edit=result.is_edit,
+                message_id=user_turn.id  # Use the assigned turn.id, not the STT result UUID
+            )
 
         if self.config.conversation.director_enabled:
             print("Getting llm output")
@@ -2404,9 +2417,13 @@ class UnifiedVoiceConversation:
                     )
             
             self.tts.first_audio_callback = stop_thinking_for_generation
-            
+
             # Stream response based on provider
             assistant_response = ""
+
+            # Pre-calculate the message ID that will be assigned when the turn is added to history
+            # This ensures the UI gets the correct ID for edit/delete operations
+            pending_message_id = f"msg_{len(self.state.conversation_history)}"
             
             # Check if this is a prepared statement request
             if prepared_statement_name and prepared_statement_name in character_config.prepared_statements:
@@ -2453,18 +2470,19 @@ class UnifiedVoiceConversation:
                     #assistant_response = prepared_text if completed else self.tts.get_spoken_text_heuristic().strip()
                     assistant_response = prepared_text
                     
-                    # Send to UI
+                    # Send to UI with the pre-calculated message_id
                     if hasattr(self, 'ui_server'):
                         await self.ui_server.broadcast_ai_stream(
                             speaker=next_speaker,
                             text=prepared_text,
                             session_id=ui_session_id,
-                            is_complete=True
+                            is_complete=True,
+                            message_id=pending_message_id
                         )
                 finally:
                     # Restore original voice config
                     self._restore_voice_config(original_config)
-                    
+
             elif character_config.llm_provider == "openai":
                 # Temporarily set character voice
                 original_config = self._set_character_voice(character_config)
@@ -2472,7 +2490,7 @@ class UnifiedVoiceConversation:
                     # Create TTS task for this character
                     self.state.current_llm_task = asyncio.create_task(
                         self.tts.speak_text(
-                            self._stream_character_openai_response(messages, character_config, request_timestamp, ui_session_id),
+                            self._stream_character_openai_response(messages, character_config, request_timestamp, ui_session_id, pending_message_id),
                             stop_thinking_for_generation
                         )
                     )
@@ -2518,7 +2536,7 @@ class UnifiedVoiceConversation:
                     # Create TTS task for this character
                     self.state.current_llm_task = asyncio.create_task(
                         self.tts.speak_text(
-                            self._stream_character_anthropic_response(messages, character_config, request_timestamp, ui_session_id),
+                            self._stream_character_anthropic_response(messages, character_config, request_timestamp, ui_session_id, pending_message_id),
                             stop_thinking_for_generation
                         )
                     )
@@ -2569,7 +2587,7 @@ class UnifiedVoiceConversation:
                     # Create TTS task for this character
                     self.state.current_llm_task = asyncio.create_task(
                         self.tts.speak_text(
-                            self._stream_character_bedrock_response(messages, character_config, request_timestamp, ui_session_id),
+                            self._stream_character_bedrock_response(messages, character_config, request_timestamp, ui_session_id, pending_message_id),
                             stop_thinking_for_generation
                         )
                     )
@@ -2637,20 +2655,21 @@ class UnifiedVoiceConversation:
                     content=assistant_response,
                     timestamp=datetime.now(),
                     status=status,
-                    character=next_speaker
+                    character=next_speaker,
+                    id=pending_message_id  # Use the pre-calculated ID to match UI
                 )
                 self._add_turn_to_history(assistant_turn)
                 # For multi-character mode, log with character name prefix (no brackets)
                 self._log_conversation_turn("assistant", f"{next_speaker}: {assistant_response}")
-                print(f"✅ Added assistant response to conversation history")
-                
+                print(f"✅ Added assistant response to conversation history with ID {pending_message_id}")
+
                 # If the response was interrupted, add a system message only if it was interrupted by user speech
                 if status == "interrupted":
                     # Check if this was interrupted by user speech
                     interrupted_by_user = False
                     if self.state.current_processing_turn and self.state.current_processing_turn.metadata:
                         interrupted_by_user = self.state.current_processing_turn.metadata.get('interrupted_by') == 'user_speech'
-                    
+
                     if interrupted_by_user:
                         system_message = f"[{next_speaker} was interrupted by user speaking]"
                         system_turn = ConversationTurn(
@@ -2732,16 +2751,16 @@ class UnifiedVoiceConversation:
                     thinking_sound=False
                 )
     
-    async def _stream_character_openai_response(self, messages, character_config, request_timestamp, ui_session_id: Optional[str] = None):
+    async def _stream_character_openai_response(self, messages, character_config, request_timestamp, ui_session_id: Optional[str] = None, pending_message_id: Optional[str] = None):
         """Stream response from OpenAI for a specific character."""
         client = self.character_manager.get_character_client(character_config.name)
         ui_session_id = ui_session_id or f"session_{request_timestamp}"
-        
+
         # Create session ID for echo tracking
         session_id = f"openai_{character_config.name}_{request_timestamp}"
         if self.echo_filter:
             self.echo_filter.on_tts_start(session_id, character_config.name)
-        
+
         try:
             response = await client.chat.completions.create(
                 model=character_config.llm_model,
@@ -2750,7 +2769,7 @@ class UnifiedVoiceConversation:
                 max_tokens=character_config.max_tokens,
                 temperature=character_config.temperature
             )
-            
+
             async for chunk in response:
                 if chunk.choices[0].delta.content:
                     content = chunk.choices[0].delta.content
@@ -2765,25 +2784,26 @@ class UnifiedVoiceConversation:
                             text=content,
                             session_id=ui_session_id
                         )
-                    
+
         except Exception as e:
             print(f"❌ OpenAI streaming error for {character_config.name}: {e}")
             raise
         finally:
-            # Send completion signal to UI
+            # Send completion signal to UI with the pre-calculated message_id
             if hasattr(self, 'ui_server'):
                 await self.ui_server.broadcast_ai_stream(
                     speaker=character_config.name,
                     text="",
                     session_id=ui_session_id,
-                    is_complete=True
+                    is_complete=True,
+                    message_id=pending_message_id
                 )
     
-    async def _stream_character_anthropic_response(self, messages, character_config, request_timestamp, ui_session_id: Optional[str] = None):
+    async def _stream_character_anthropic_response(self, messages, character_config, request_timestamp, ui_session_id: Optional[str] = None, pending_message_id: Optional[str] = None):
         """Stream response from Anthropic for a specific character."""
         client = self.character_manager.get_character_client(character_config.name)
         ui_session_id = ui_session_id or f"session_{request_timestamp}"
-        
+
         # Create session ID for echo tracking
         session_id = f"anthropic_{character_config.name}_{request_timestamp}"
         if self.echo_filter:
@@ -2937,16 +2957,17 @@ class UnifiedVoiceConversation:
             print(f"❌ Anthropic streaming error for {character_config.name}: {e}")
             raise
         finally:
-            # Send completion signal to UI
+            # Send completion signal to UI with the pre-calculated message_id
             if hasattr(self, 'ui_server'):
                 await self.ui_server.broadcast_ai_stream(
                     speaker=character_config.name,
                     text="",
                     session_id=ui_session_id,
-                    is_complete=True
+                    is_complete=True,
+                    message_id=pending_message_id
                 )
-    
-    async def _stream_character_bedrock_response(self, messages, character_config, request_timestamp, ui_session_id: Optional[str] = None):
+
+    async def _stream_character_bedrock_response(self, messages, character_config, request_timestamp, ui_session_id: Optional[str] = None, pending_message_id: Optional[str] = None):
         """Stream response from Bedrock for a specific character."""
         # For Bedrock, we use the async bedrock client
         client = self.async_bedrock_client
@@ -3112,15 +3133,16 @@ class UnifiedVoiceConversation:
             print(f"❌ Bedrock streaming error for {character_config.name}: {e}")
             raise
         finally:
-            # Send completion signal to UI
+            # Send completion signal to UI with the pre-calculated message_id
             if hasattr(self, 'ui_server'):
                 await self.ui_server.broadcast_ai_stream(
                     speaker=character_config.name,
                     text="",
                     session_id=ui_session_id,
-                    is_complete=True
+                    is_complete=True,
+                    message_id=pending_message_id
                 )
-    
+
     def _get_conversation_history_for_director(self):
         """Get conversation history formatted for director.
         Excludes images since director only needs text to decide who speaks next.

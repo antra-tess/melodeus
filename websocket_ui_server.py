@@ -609,8 +609,9 @@ class VoiceUIServer:
                 data=message_data
             ))
         
-    async def broadcast_ai_stream(self, speaker: str, text: str, 
-                                 is_complete: bool = False, session_id: str = ""):
+    async def broadcast_ai_stream(self, speaker: str, text: str,
+                                 is_complete: bool = False, session_id: str = "",
+                                 message_id: str = None):
         """Broadcast AI response stream."""
         message_data = {
             "speaker": speaker,
@@ -619,11 +620,12 @@ class VoiceUIServer:
             "session_id": session_id,
             "timestamp": time.time()
         }
-        
+
         # Add message ID for completed messages so they can be edited/deleted
+        # Use provided message_id if available, otherwise generate UUID (fallback)
         if is_complete:
-            message_data["message_id"] = str(uuid.uuid4())
-            
+            message_data["message_id"] = message_id if message_id else str(uuid.uuid4())
+
         await self.broadcast(UIMessage(
             type="ai_stream",
             data=message_data
@@ -671,7 +673,7 @@ class VoiceUIServer:
                 timestamp = time.time()
                 
             turn_data = {
-                "id": f"msg_{i}",  # Unique message ID
+                "id": getattr(turn, 'id', None) or f"msg_{i}",  # Use turn.id if set, else fallback
                 "role": turn.role,
                 "content": turn.content,
                 "speaker_name": getattr(turn, 'speaker_name', None),
