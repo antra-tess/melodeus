@@ -96,7 +96,12 @@ conversation:
 audio:
   input_device_name: null   # null for default microphone, or specify device name like "Scarlett 18i20"
   output_device_name: null  # null for default speakers, or specify device name like "Loopback Audio"
-  
+  stream_sample_rate: 48000  # Shared mel-aec duplex stream sample rate (Hz)
+  stream_channels: 1         # Number of channels for shared stream
+  stream_buffer_size: 480    # Buffer size in samples (approx 10 ms at 48 kHz)
+  stream_enable_aec: null    # true/false to force enable/disable AEC, null to inherit conversation.enable_echo_cancellation
+  aec_filter_length: 2048    # Override AEC filter length (samples) if needed
+
 # Logging Settings
 logging:
   level: "INFO"              # DEBUG, INFO, WARNING, ERROR

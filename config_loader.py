@@ -110,6 +110,11 @@ class AudioConfig:
     """Audio device configuration."""
     input_device_name: Optional[str] = None
     output_device_name: Optional[str] = None
+    stream_sample_rate: Optional[int] = None
+    stream_channels: Optional[int] = None
+    stream_buffer_size: Optional[int] = None
+    stream_enable_aec: Optional[bool] = None
+    aec_filter_length: Optional[int] = None
 
 @dataclass
 class LoggingConfig:
@@ -449,7 +454,12 @@ class ConfigLoader:
         # Create other configurations
         audio_config = AudioConfig(
             input_device_name=audio_config_data.get('input_device_name'),
-            output_device_name=audio_config_data.get('output_device_name')
+            output_device_name=audio_config_data.get('output_device_name'),
+            stream_sample_rate=audio_config_data.get('stream_sample_rate'),
+            stream_channels=audio_config_data.get('stream_channels'),
+            stream_buffer_size=audio_config_data.get('stream_buffer_size'),
+            stream_enable_aec=audio_config_data.get('stream_enable_aec'),
+            aec_filter_length=audio_config_data.get('aec_filter_length'),
         )
         
         logging_config = LoggingConfig(
@@ -552,7 +562,7 @@ class ConfigLoader:
                 auto_save_interval=contexts_data.get('auto_save_interval', 30)
             )
         
-        return VoiceAIConfig(
+        config = VoiceAIConfig(
             conversation=conversation_config,
             stt=stt_config,
             tts=tts_config,
@@ -565,6 +575,15 @@ class ConfigLoader:
             osc=osc_config,
             contexts=contexts_config
         )
+
+        try:
+            from mel_aec_audio import configure_audio_stream_from_config
+
+            configure_audio_stream_from_config(config)
+        except Exception as exc:
+            print(f"⚠️ Unable to configure mel-aec stream from config: {exc}")
+
+        return config
     
     @classmethod
     def create_example_config(cls, output_path: str = "config.yaml"):

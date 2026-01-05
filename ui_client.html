@@ -1,10 +1,11 @@
 <!DOCTYPE html>
 <html>
 <head>
+    <meta charset="UTF-8">
     <title>Voice Conversation Control Panel</title>
     <style>
         body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Segoe UI Emoji', 'Segoe UI Symbol', 'Noto Color Emoji', Roboto, sans-serif;
             max-width: 1200px;
             margin: 0 auto;
             padding: 20px;
@@ -506,6 +507,8 @@
         let messageCount = 0;
         let isConnected = false;
         let availableCharacters = [];  // Track available AI characters
+        let reconnectTimer = null;
+        const RECONNECT_DELAY_MS = 500;
         
         function updateConnectionStatus(connected) {
             isConnected = connected;
@@ -530,11 +533,26 @@
             });
         }
         
+        function scheduleReconnect() {
+            if (reconnectTimer !== null) {
+                return;
+            }
+            reconnectTimer = setTimeout(() => {
+                reconnectTimer = null;
+                connect();
+            }, RECONNECT_DELAY_MS);
+        }
+
         function connect() {
-            ws = new WebSocket('ws://localhost:8765');
+            const hostname = window.location.hostname || 'localhost';
+            ws = new WebSocket('ws://' + hostname + ':8765');
             
             ws.onopen = () => {
                 console.log('Connected to voice system');
+                if (reconnectTimer !== null) {
+                    clearTimeout(reconnectTimer);
+                    reconnectTimer = null;
+                }
                 updateConnectionStatus(true);
                 ws.send(JSON.stringify({ type: 'ui_ready', data: { client_id: 'web-ui' }}));
             };
@@ -542,12 +560,22 @@
             ws.onclose = () => {
                 console.log('Disconnected from voice system');
                 updateConnectionStatus(false);
-                setTimeout(connect, 3000);  // Reconnect after 3s
+                ws = null;
+                scheduleReconnect();
             };
             
             ws.onerror = (error) => {
                 console.error('WebSocket error:', error);
                 updateConnectionStatus(false);
+                if (ws && ws.readyState !== WebSocket.CLOSED) {
+                    try {
+                        ws.close();
+                    } catch (closeError) {
+                        console.error('Error closing failed WebSocket:', closeError);
+                    }
+                }
+                ws = null;
+                scheduleReconnect();
             };
             
             ws.onmessage = (event) => {
@@ -692,6 +720,7 @@
                         </div>
                     ` : ''}
                 `;
+                msg.id = data.message_id;
                 transcript.appendChild(msg);
                 
                 // Auto-delete ignored interruption messages after 3 seconds
@@ -727,6 +756,7 @@
                     <div class="speaker-name">${data.speaker}</div>
                     <div class="message-content"></div>
                 `;
+                msg.id = data.message_id;
                 transcript.appendChild(msg);
                 currentMessages[data.session_id] = msg;
                 messageCount++;

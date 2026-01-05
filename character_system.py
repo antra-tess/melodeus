@@ -181,6 +181,10 @@ class CharacterManager:
             f"- {name}"
             for name, config in self.characters.items()
         ])
+
+        for name, config in self.characters.items():
+            if not "user" in name.lower():
+                return name
         
         # Add actual speaker names from conversation history
         speaker_names = set()
