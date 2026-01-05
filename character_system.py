@@ -110,6 +110,13 @@ class CharacterManager:
         # Track active character
         self.active_character: Optional[str] = None
     
+    def get_default_character(self) -> Optional[str]:
+        """Get the first available non-user character."""
+        for name, config in self.characters.items():
+            if "user" not in name.lower():
+                return name
+        return None
+    
     def _init_llm_clients(self):
         """Initialize LLM clients for all characters."""
         # Group by provider and API key to avoid duplicate clients

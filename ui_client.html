@@ -457,9 +457,16 @@
         <button id="interruptions-toggle" onclick="toggleInterruptions()">
             <span>🚫</span> Interruptions OFF
         </button>
-        <button id="director-toggle" onclick="toggleDirector()">
-            <span>🚫</span> Director OFF
-        </button>
+        <label style="font-weight: 600; margin-left: 15px; margin-right: 8px;">Director:</label>
+        <select id="director-mode" onchange="setDirectorMode(this.value)" style="padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+            <option value="off">🚫 Off</option>
+            <option value="same_model">🔄 Same Model</option>
+            <option value="director">🎭 Director</option>
+        </select>
+        <label style="font-weight: 600; margin-left: 15px; margin-right: 8px;">Next AI:</label>
+        <select id="next-ai-speaker" onchange="setNextAiSpeaker(this.value)" style="padding: 8px; border: 1px solid #ddd; border-radius: 4px; min-width: 120px;">
+            <option value="">— Select —</option>
+        </select>
     </div>
     
     <div class="controls" style="margin-top: 10px;" id="trigger-buttons">
@@ -502,11 +509,13 @@
         let ws = null;
         let sttActive = true;
         let interruptionsEnabled = false;  // Default to false
-        let directorEnabled = false;  // Default to false
+        let directorEnabled = false;  // Default to false (legacy)
+        let directorMode = 'off';  // "off", "same_model", "director"
+        let lastAiSpeaker = null;  // Which AI will respond next in same_model mode
+        let availableCharacters = [];  // List of AI characters
         let currentMessages = {};  // Track ongoing AI messages by session
         let messageCount = 0;
         let isConnected = false;
-        let availableCharacters = [];  // Track available AI characters
         let reconnectTimer = null;
         const RECONNECT_DELAY_MS = 500;
         
@@ -545,7 +554,7 @@
 
         function connect() {
             const hostname = window.location.hostname || 'localhost';
-            ws = new WebSocket('ws://' + hostname + ':8765');
+            ws = new WebSocket('ws://' + hostname + ':8795');
             
             ws.onopen = () => {
                 console.log('Connected to voice system');
@@ -625,6 +634,15 @@
                     break;
                 case 'director_toggled':
                     updateDirectorState(msg.data);
+                    break;
+                case 'director_mode_changed':
+                    updateDirectorMode(msg.data.mode);
+                    break;
+                case 'available_characters':
+                    updateAvailableCharacters(msg.data);
+                    break;
+                case 'last_ai_speaker_changed':
+                    updateLastAiSpeaker(msg.data.character);
                     break;
                 case 'contexts_list':
                     updateContextsList(msg.data);
@@ -890,13 +908,43 @@
         }
         
         function toggleDirector() {
+            // Legacy function - convert to mode
+            setDirectorMode(directorEnabled ? 'off' : 'director');
+        }
+        
+        function setDirectorMode(mode) {
             if (ws && ws.readyState === WebSocket.OPEN) {
-                const newState = !directorEnabled;
                 ws.send(JSON.stringify({ 
-                    type: 'toggle_director', 
-                    data: { enabled: newState }
+                    type: 'set_director_mode', 
+                    data: { mode: mode }
                 }));
                 // UI will update when we receive the confirmation
+            }
+        }
+        
+        function updateDirectorMode(mode) {
+            directorMode = mode;
+            directorEnabled = (mode !== 'off');
+            const selector = document.getElementById('director-mode');
+            if (selector) {
+                selector.value = mode;
+            }
+        }
+        
+        function updateLastAiSpeaker(character) {
+            lastAiSpeaker = character;
+            const selector = document.getElementById('next-ai-speaker');
+            if (selector) {
+                selector.value = character || '';
+            }
+        }
+        
+        function setNextAiSpeaker(character) {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ 
+                    type: 'set_last_ai_speaker', 
+                    data: { character: character || null }
+                }));
             }
         }
         
@@ -967,6 +1015,26 @@
                 button.innerHTML = `<span>${getCharacterEmoji(char.name)}</span> Trigger ${char.name}`;
                 triggerButtons.appendChild(button);
             });
+            
+            // Update the Next AI speaker dropdown
+            const nextAiSelector = document.getElementById('next-ai-speaker');
+            if (nextAiSelector) {
+                // Clear existing options except the first one
+                while (nextAiSelector.options.length > 1) {
+                    nextAiSelector.remove(1);
+                }
+                // Add characters
+                availableCharacters.forEach(char => {
+                    const option = document.createElement('option');
+                    option.value = char.name;
+                    option.textContent = char.name;
+                    nextAiSelector.appendChild(option);
+                });
+                // Set current value if we have one
+                if (lastAiSpeaker) {
+                    nextAiSelector.value = lastAiSpeaker;
+                }
+            }
         }
         
         function getCharacterEmoji(name) {
@@ -1059,7 +1127,19 @@
             // Update director state
             if (data.director_enabled !== undefined) {
                 directorEnabled = data.director_enabled;
-                updateDirectorButton();
+            }
+            
+            // Update director mode
+            if (data.director_mode !== undefined) {
+                updateDirectorMode(data.director_mode);
+            } else if (data.director_enabled !== undefined) {
+                // Legacy fallback
+                updateDirectorMode(data.director_enabled ? 'director' : 'off');
+            }
+            
+            // Update last AI speaker
+            if (data.last_ai_speaker !== undefined) {
+                updateLastAiSpeaker(data.last_ai_speaker);
             }
         }
         
