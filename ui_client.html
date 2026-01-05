@@ -320,6 +320,105 @@
             font-style: italic;
         }
         
+        .learned-speakers-panel {
+            background: white;
+            border-radius: 8px;
+            padding: 12px;
+            margin-top: 10px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        
+        .learned-speakers-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            cursor: pointer;
+            padding: 4px 0;
+        }
+        
+        .learned-speakers-header h3 {
+            margin: 0;
+            font-size: 14px;
+            color: #666;
+        }
+        
+        .learned-speakers-list {
+            margin-top: 10px;
+        }
+        
+        .learned-speaker-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 6px 8px;
+            background: #f5f5f5;
+            border-radius: 4px;
+            margin-bottom: 6px;
+        }
+        
+        .learned-speaker-item input {
+            flex: 1;
+            padding: 4px 8px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-size: 13px;
+        }
+        
+        .learned-speaker-item .save-btn {
+            background: #4CAF50;
+            color: white;
+            border: none;
+            padding: 4px 10px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 12px;
+        }
+        
+        .learned-speaker-item .save-btn:hover {
+            background: #45a049;
+        }
+        
+        .learned-speaker-item input[type="checkbox"] {
+            margin-right: 8px;
+            cursor: pointer;
+        }
+        
+        .merge-controls {
+            display: flex;
+            gap: 8px;
+            margin-top: 10px;
+            padding-top: 10px;
+            border-top: 1px solid #eee;
+            align-items: center;
+        }
+        
+        .merge-controls input {
+            flex: 1;
+            padding: 6px 10px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-size: 13px;
+        }
+        
+        .merge-btn {
+            background: #2196F3;
+            color: white;
+            border: none;
+            padding: 6px 12px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 12px;
+        }
+        
+        .merge-btn:hover {
+            background: #1976D2;
+        }
+        
+        .merge-btn:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+        }
+        
         .speaker-name {
             font-weight: 600;
             color: #666;
@@ -537,6 +636,16 @@
         </div>
     </div>
     
+    <div class="learned-speakers-panel" id="learned-speakers-panel" style="display: none;">
+        <div class="learned-speakers-header" onclick="toggleLearnedSpeakers()">
+            <h3>🎤 Learned Speakers</h3>
+            <span id="learned-speakers-toggle">▼</span>
+        </div>
+        <div class="learned-speakers-list" id="learned-speakers-list">
+            <!-- Dynamically populated -->
+        </div>
+    </div>
+    
     <div class="transcript-container">
         <div class="transcript-header">
             Conversation Transcript
@@ -560,6 +669,8 @@
         let currentMessages = {};  // Track ongoing AI messages by session
         let messageCount = 0;
         let isConnected = false;
+        let learnedSpeakers = [];  // List of learned speaker IDs
+        let learnedSpeakersExpanded = true;
         let reconnectTimer = null;
         const RECONNECT_DELAY_MS = 500;
         
@@ -696,6 +807,32 @@
                     break;
                 case 'context_reset':
                     showContextReset();
+                    break;
+                case 'learned_speakers':
+                    learnedSpeakers = msg.data.speakers || [];
+                    updateLearnedSpeakersUI();
+                    break;
+                case 'speaker_renamed':
+                    // Update the UI with the new speaker list
+                    learnedSpeakers = msg.data.known_speakers || [];
+                    updateLearnedSpeakersUI();
+                    // Update transcript history
+                    updateTranscriptSpeakerNames(msg.data.old_id, msg.data.new_name);
+                    console.log(`Speaker renamed: ${msg.data.old_id} -> ${msg.data.new_name}`);
+                    break;
+                case 'speakers_merged':
+                    // Update the UI with the new speaker list
+                    learnedSpeakers = msg.data.known_speakers || [];
+                    updateLearnedSpeakersUI();
+                    // Update transcript history for all merged speakers
+                    msg.data.merged_ids.forEach(oldId => {
+                        updateTranscriptSpeakerNames(oldId, msg.data.target_name);
+                    });
+                    console.log(`Speakers merged: ${msg.data.merged_ids.join(', ')} -> ${msg.data.target_name}`);
+                    break;
+                case 'fingerprints_reset':
+                    learnedSpeakers = [];
+                    updateLearnedSpeakersUI();
                     break;
             }
         }
@@ -950,8 +1087,148 @@
             if (ws && ws.readyState === WebSocket.OPEN) {
                 if (confirm('Reset voice fingerprint database? All learned voices will be cleared.')) {
                     ws.send(JSON.stringify({ type: 'reset_fingerprints' }));
+                    learnedSpeakers = [];
+                    updateLearnedSpeakersUI();
                 }
             }
+        }
+
+        function toggleLearnedSpeakers() {
+            learnedSpeakersExpanded = !learnedSpeakersExpanded;
+            const list = document.getElementById('learned-speakers-list');
+            const toggle = document.getElementById('learned-speakers-toggle');
+            if (learnedSpeakersExpanded) {
+                list.style.display = 'block';
+                toggle.textContent = '▼';
+            } else {
+                list.style.display = 'none';
+                toggle.textContent = '▶';
+            }
+        }
+
+        function updateLearnedSpeakersUI() {
+            const panel = document.getElementById('learned-speakers-panel');
+            const list = document.getElementById('learned-speakers-list');
+            
+            if (learnedSpeakers.length === 0) {
+                panel.style.display = 'none';
+                return;
+            }
+            
+            panel.style.display = 'block';
+            let html = learnedSpeakers.map(speaker => {
+                // Convert internal ID to display name
+                let displayName = speaker;
+                if (speaker.startsWith('unknown_speaker_')) {
+                    displayName = 'User ' + speaker.replace('unknown_speaker_', '');
+                }
+                return `
+                    <div class="learned-speaker-item" data-speaker-id="${speaker}">
+                        <input type="checkbox" id="merge-check-${speaker}" onchange="updateMergeButton()">
+                        <span style="color: #999; font-size: 11px; min-width: 60px;">${displayName} →</span>
+                        <input type="text" value="${speaker.startsWith('unknown_speaker_') ? '' : speaker}" 
+                               placeholder="Enter name..." id="rename-${speaker}">
+                        <button class="save-btn" onclick="renameSpeaker('${speaker}')">Rename</button>
+                    </div>
+                `;
+            }).join('');
+            
+            // Add merge controls if there are 2+ speakers
+            if (learnedSpeakers.length >= 2) {
+                html += `
+                    <div class="merge-controls">
+                        <span style="font-size: 12px; color: #666;">Merge selected →</span>
+                        <input type="text" id="merge-target-name" placeholder="New name for merged speaker">
+                        <button class="merge-btn" id="merge-btn" onclick="mergeSelectedSpeakers()" disabled>
+                            🔀 Merge
+                        </button>
+                    </div>
+                `;
+            }
+            
+            list.innerHTML = html;
+        }
+        
+        function updateMergeButton() {
+            const checked = document.querySelectorAll('.learned-speaker-item input[type="checkbox"]:checked');
+            const mergeBtn = document.getElementById('merge-btn');
+            if (mergeBtn) {
+                mergeBtn.disabled = checked.length < 2;
+            }
+        }
+        
+        function getSelectedSpeakers() {
+            const selected = [];
+            document.querySelectorAll('.learned-speaker-item input[type="checkbox"]:checked').forEach(cb => {
+                const item = cb.closest('.learned-speaker-item');
+                if (item) {
+                    selected.push(item.dataset.speakerId);
+                }
+            });
+            return selected;
+        }
+        
+        function mergeSelectedSpeakers() {
+            const speakerIds = getSelectedSpeakers();
+            const targetName = document.getElementById('merge-target-name').value.trim();
+            
+            if (speakerIds.length < 2) {
+                alert('Select at least 2 speakers to merge');
+                return;
+            }
+            
+            if (!targetName) {
+                alert('Enter a name for the merged speaker');
+                return;
+            }
+            
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({
+                    type: 'merge_speakers',
+                    data: { speaker_ids: speakerIds, target_name: targetName }
+                }));
+            }
+        }
+
+        function renameSpeaker(oldId) {
+            const input = document.getElementById('rename-' + oldId);
+            const newName = input.value.trim();
+            
+            if (!newName) {
+                alert('Please enter a name');
+                return;
+            }
+            
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({
+                    type: 'rename_speaker',
+                    data: { old_id: oldId, new_name: newName }
+                }));
+            }
+        }
+
+        function updateTranscriptSpeakerNames(oldName, newName) {
+            // Convert internal ID to display name for matching
+            let displayOldName = oldName;
+            if (oldName.startsWith('unknown_speaker_')) {
+                displayOldName = 'User ' + oldName.replace('unknown_speaker_', '');
+            }
+            
+            // Update all messages in transcript with the old speaker name
+            const transcript = document.getElementById('transcript');
+            const messages = transcript.querySelectorAll('.message');
+            
+            messages.forEach(msg => {
+                const speakerDiv = msg.querySelector('.speaker-name');
+                if (speakerDiv && speakerDiv.textContent.toUpperCase() === displayOldName.toUpperCase()) {
+                    speakerDiv.textContent = newName.toUpperCase();
+                    // Also update the class
+                    msg.className = msg.className.replace(
+                        new RegExp('\\b' + displayOldName.toLowerCase().replace(/\s+/g, '-') + '\\b'),
+                        newName.toLowerCase().replace(/\s+/g, '-')
+                    );
+                }
+            });
         }
 
         function toggleInterruptions() {

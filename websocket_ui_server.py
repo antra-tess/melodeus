@@ -157,6 +157,18 @@ class VoiceUIServer:
                 # Reset voice fingerprint database
                 await self.handle_reset_fingerprints()
 
+            elif msg_type == "rename_speaker":
+                # Rename a learned speaker
+                old_id = data.get("old_id")
+                new_name = data.get("new_name")
+                await self.handle_rename_speaker(old_id, new_name)
+
+            elif msg_type == "merge_speakers":
+                # Merge multiple speakers into one
+                speaker_ids = data.get("speaker_ids", [])
+                target_name = data.get("target_name")
+                await self.handle_merge_speakers(speaker_ids, target_name)
+
             elif msg_type == "send_text_message":
                 # Handle text message from UI
                 speaker_name = data.get("speaker_name", "USER")
@@ -711,6 +723,24 @@ class VoiceUIServer:
         """Send current system state to a client."""
         msg = UIMessage("state_sync", self.current_state)
         await websocket.send(msg.to_json())
+        
+        # Also send learned speakers
+        await self.send_learned_speakers(websocket)
+    
+    async def send_learned_speakers(self, websocket):
+        """Send list of learned speakers to a client."""
+        if not self.conversation:
+            return
+        
+        try:
+            if hasattr(self.conversation, 'stt') and hasattr(self.conversation.stt, 'voice_fingerprinter'):
+                fingerprinter = self.conversation.stt.voice_fingerprinter
+                if fingerprinter:
+                    speakers = fingerprinter.get_known_speakers()
+                    msg = UIMessage("learned_speakers", {"speakers": speakers})
+                    await websocket.send(msg.to_json())
+        except Exception as e:
+            print(f"⚠️ Error sending learned speakers: {e}")
     
     async def handle_edit_message(self, msg_id: str, new_text: str):
         """Handle message edit request."""
@@ -808,6 +838,112 @@ class VoiceUIServer:
                 print("⚠️ Voice fingerprinting not enabled")
         except Exception as e:
             self.logger.error(f"Error resetting fingerprints: {e}")
+            await self.send_error(None, str(e))
+
+    async def handle_rename_speaker(self, old_id: str, new_name: str):
+        """Rename a learned speaker (e.g., 'User 1' -> 'antra_tessera')."""
+        if not self.conversation:
+            return
+
+        try:
+            if hasattr(self.conversation, 'stt') and hasattr(self.conversation.stt, 'voice_fingerprinter'):
+                fingerprinter = self.conversation.stt.voice_fingerprinter
+                if fingerprinter:
+                    success = fingerprinter.rename_speaker(old_id, new_name)
+                    if success:
+                        # Convert internal ID to display name for history matching
+                        display_old_name = old_id
+                        if old_id.startswith("unknown_speaker_"):
+                            display_old_name = "User " + old_id.replace("unknown_speaker_", "")
+                        
+                        # Update conversation history
+                        updated_count = 0
+                        if hasattr(self.conversation, 'state') and hasattr(self.conversation.state, 'conversation_history'):
+                            for turn in self.conversation.state.conversation_history:
+                                if hasattr(turn, 'speaker_name') and turn.speaker_name:
+                                    if turn.speaker_name.lower() == display_old_name.lower():
+                                        turn.speaker_name = new_name
+                                        updated_count += 1
+                        
+                        print(f"📝 Updated {updated_count} history entries: '{display_old_name}' -> '{new_name}'")
+                        
+                        # Update detected speakers set
+                        if hasattr(self.conversation, 'detected_speakers'):
+                            if display_old_name in self.conversation.detected_speakers:
+                                self.conversation.detected_speakers.discard(display_old_name)
+                                self.conversation.detected_speakers.add(new_name)
+                        
+                        # Get updated list of speakers
+                        speakers = fingerprinter.get_known_speakers()
+                        await self.broadcast(UIMessage("speaker_renamed", {
+                            "old_id": old_id,
+                            "new_name": new_name,
+                            "known_speakers": speakers
+                        }))
+                    else:
+                        await self.send_error(None, f"Failed to rename speaker '{old_id}'")
+                else:
+                    print("⚠️ No voice fingerprinter available")
+            else:
+                print("⚠️ Voice fingerprinting not enabled")
+        except Exception as e:
+            self.logger.error(f"Error renaming speaker: {e}")
+            await self.send_error(None, str(e))
+
+    async def handle_merge_speakers(self, speaker_ids: list, target_name: str):
+        """Merge multiple learned speakers into one."""
+        if not self.conversation or not speaker_ids or len(speaker_ids) < 2 or not target_name:
+            await self.send_error(None, "Need at least 2 speakers and a target name to merge")
+            return
+
+        try:
+            if hasattr(self.conversation, 'stt') and hasattr(self.conversation.stt, 'voice_fingerprinter'):
+                fingerprinter = self.conversation.stt.voice_fingerprinter
+                if fingerprinter:
+                    success = fingerprinter.merge_speakers(speaker_ids, target_name)
+                    if success:
+                        # Convert internal IDs to display names for history matching
+                        display_names = []
+                        for sid in speaker_ids:
+                            if sid.startswith("unknown_speaker_"):
+                                display_names.append("User " + sid.replace("unknown_speaker_", ""))
+                            elif sid.startswith("User "):
+                                display_names.append(sid)
+                            else:
+                                display_names.append(sid)
+                        
+                        # Update conversation history for all merged speakers
+                        updated_count = 0
+                        if hasattr(self.conversation, 'state') and hasattr(self.conversation.state, 'conversation_history'):
+                            for turn in self.conversation.state.conversation_history:
+                                if hasattr(turn, 'speaker_name') and turn.speaker_name:
+                                    if turn.speaker_name.lower() in [dn.lower() for dn in display_names]:
+                                        turn.speaker_name = target_name
+                                        updated_count += 1
+                        
+                        print(f"📝 Updated {updated_count} history entries to '{target_name}'")
+                        
+                        # Update detected speakers set
+                        if hasattr(self.conversation, 'detected_speakers'):
+                            for dn in display_names:
+                                self.conversation.detected_speakers.discard(dn)
+                            self.conversation.detected_speakers.add(target_name)
+                        
+                        # Get updated list of speakers
+                        speakers = fingerprinter.get_known_speakers()
+                        await self.broadcast(UIMessage("speakers_merged", {
+                            "merged_ids": speaker_ids,
+                            "target_name": target_name,
+                            "known_speakers": speakers
+                        }))
+                    else:
+                        await self.send_error(None, f"Failed to merge speakers")
+                else:
+                    print("⚠️ No voice fingerprinter available")
+            else:
+                print("⚠️ Voice fingerprinting not enabled")
+        except Exception as e:
+            self.logger.error(f"Error merging speakers: {e}")
             await self.send_error(None, str(e))
 
     async def handle_text_message(self, speaker_name: str, text: str):
