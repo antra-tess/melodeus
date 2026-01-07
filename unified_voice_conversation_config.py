@@ -281,7 +281,10 @@ class UnifiedVoiceConversation:
         
         # Set up STT callbacks
         self._setup_stt_callbacks()
-        
+
+        # Set up fingerprinter callback for UI updates
+        self._setup_fingerprinter_callback()
+
         # Apply logging configuration
         self._setup_logging()
         
@@ -619,6 +622,7 @@ class UnifiedVoiceConversation:
             "conversation_history": [
                 self._serialize_conversation_turn(turn)
                 for turn in self.state.conversation_history
+                if getattr(turn, 'status', None) != 'deleted'
             ],
             "state": {
                 "current_generation": self.state.current_generation,
@@ -1254,7 +1258,33 @@ class UnifiedVoiceConversation:
         
         # Handle errors
         self.stt.on(STTEventType.ERROR, self._on_error)
-    
+
+    def _setup_fingerprinter_callback(self):
+        """Set up callback for fingerprinter to notify UI when speakers change."""
+        if hasattr(self, 'stt') and hasattr(self.stt, 'voice_fingerprinter'):
+            fingerprinter = self.stt.voice_fingerprinter
+            if fingerprinter:
+                def on_speakers_changed():
+                    # Schedule async broadcast on the event loop
+                    import asyncio
+                    try:
+                        loop = asyncio.get_event_loop()
+                        if loop.is_running():
+                            loop.create_task(self._broadcast_learned_speakers())
+                    except Exception as e:
+                        print(f"⚠️ Error broadcasting speakers change: {e}")
+                fingerprinter.on_speakers_changed = on_speakers_changed
+                print("🔗 Fingerprinter callback connected to UI")
+
+    async def _broadcast_learned_speakers(self):
+        """Broadcast updated learned speakers list to all UI clients."""
+        if hasattr(self, 'ui_server') and hasattr(self, 'stt') and hasattr(self.stt, 'voice_fingerprinter'):
+            fingerprinter = self.stt.voice_fingerprinter
+            if fingerprinter:
+                speakers = fingerprinter.get_known_speakers()
+                from websocket_ui_server import UIMessage
+                await self.ui_server.broadcast(UIMessage("learned_speakers", {"speakers": speakers}))
+
     async def start_conversation(self):
         """Start the voice conversation system."""
         print("🎙️ Starting Unified Voice Conversation System (YAML Config)")

@@ -79,6 +79,7 @@ class STTConfig:
     keywords: Optional[List[Tuple[str, float]]] = None  # List of (word, weight) tuples
     # Debug settings
     debug_speaker_data: bool = False  # Enable detailed speaker/timing debug output
+    save_user_audio: bool = False  # Save recognized user speech segments (async, non-blocking)
 
 class AsyncSTTStreamer:
     """Async STT Streamer with callback support."""
@@ -109,12 +110,15 @@ class AsyncSTTStreamer:
         self.voice_fingerprinter = None
         if config.enable_speaker_id:
             try:
-                # Enable debug audio saving if debug_speaker_data is enabled
+                # Audio saving options
                 debug_save_audio = getattr(config, 'debug_speaker_data', False)
-                self.voice_fingerprinter = TitaNetVoiceFingerprinter(speakers_config, debug_save_audio=debug_save_audio)
+                save_user_audio = getattr(config, 'save_user_audio', False)
+                self.voice_fingerprinter = TitaNetVoiceFingerprinter(
+                    speakers_config,
+                    debug_save_audio=debug_save_audio,
+                    save_user_audio=save_user_audio
+                )
                 print(f"🤖 TitaNet voice fingerprinting enabled")
-                if debug_save_audio:
-                    print(f"🐛 Debug audio saving enabled - extracted segments will be saved to debug_audio_segments/")
             except Exception as e:
                 print(f"⚠️  TitaNet voice fingerprinting failed to initialize: {e}")
         

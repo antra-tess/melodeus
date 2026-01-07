@@ -385,7 +385,8 @@ class ConfigLoader:
             enable_speaker_id=stt_config_data.get('enable_speaker_id', False),
             speaker_profiles_path=stt_config_data.get('speaker_profiles_path'),
             keywords=keywords,
-            debug_speaker_data=stt_config_data.get('debug_speaker_data', False)
+            debug_speaker_data=stt_config_data.get('debug_speaker_data', False),
+            save_user_audio=stt_config_data.get('save_user_audio', False)
         )
         
         # Create TTS configuration
