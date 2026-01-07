@@ -531,7 +531,7 @@ class TitaNetVoiceFingerprinter:
             if speaker_similarity > best_similarity:
                 best_similarity = speaker_similarity
                 best_match = speaker_id
-        print(f"Best similarity {best_similarity} with speaker id {speaker_id}")
+        print(f"Best similarity {best_similarity:.3f} with speaker id {best_match} (threshold: {self.confidence_threshold:.3f})")
         
         if best_similarity >= self.confidence_threshold:
             # Get speaker name for display
@@ -640,6 +640,105 @@ class TitaNetVoiceFingerprinter:
             print(f"⚠️ [TITANET] Failed to delete fingerprint file: {e}")
         print(f"🔄 [TITANET] Reset complete - cleared {count} speaker profiles")
         return count
+
+    def rename_speaker(self, old_id: str, new_name: str) -> bool:
+        """Rename a speaker (e.g., 'unknown_speaker_1' -> 'antra_tessera').
+        
+        Args:
+            old_id: The current speaker ID (e.g., 'unknown_speaker_1' or 'User 1')
+            new_name: The new name for this speaker
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        # Handle "User X" format by converting to internal ID
+        if old_id.startswith("User "):
+            try:
+                num = old_id.replace("User ", "")
+                old_id = f"unknown_speaker_{num}"
+            except:
+                pass
+        
+        if old_id not in self.reference_fingerprints:
+            print(f"⚠️ [TITANET] Speaker '{old_id}' not found")
+            return False
+        
+        # Get the fingerprints
+        fingerprints = self.reference_fingerprints.pop(old_id)
+        
+        # Add under new name
+        self.reference_fingerprints[new_name] = fingerprints
+        
+        # Update session speakers mapping
+        for dg_id, speaker_id in list(self.session_speakers.items()):
+            if speaker_id == old_id:
+                self.session_speakers[dg_id] = new_name
+        
+        # Save to disk
+        self._save_reference_fingerprints()
+        
+        print(f"✅ [TITANET] Renamed '{old_id}' -> '{new_name}' ({len(fingerprints)} fingerprints)")
+        return True
+    
+    def get_known_speakers(self) -> list:
+        """Get list of all known speaker IDs."""
+        return list(self.reference_fingerprints.keys())
+
+    def merge_speakers(self, speaker_ids: list, target_name: str) -> bool:
+        """Merge multiple speakers into one, combining their fingerprints.
+        
+        Args:
+            speaker_ids: List of speaker IDs to merge (e.g., ['User 1', 'User 2'] or 
+                        ['unknown_speaker_1', 'unknown_speaker_2'])
+            target_name: The name for the merged speaker
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        if len(speaker_ids) < 2:
+            print(f"⚠️ [TITANET] Need at least 2 speakers to merge")
+            return False
+        
+        # Convert "User X" format to internal IDs
+        internal_ids = []
+        for sid in speaker_ids:
+            if sid.startswith("User "):
+                try:
+                    num = sid.replace("User ", "")
+                    internal_ids.append(f"unknown_speaker_{num}")
+                except:
+                    internal_ids.append(sid)
+            else:
+                internal_ids.append(sid)
+        
+        # Check all speakers exist
+        for sid in internal_ids:
+            if sid not in self.reference_fingerprints:
+                print(f"⚠️ [TITANET] Speaker '{sid}' not found")
+                return False
+        
+        # Collect all fingerprints from all speakers
+        merged_fingerprints = []
+        for sid in internal_ids:
+            merged_fingerprints.extend(self.reference_fingerprints[sid])
+        
+        # Remove old speakers
+        for sid in internal_ids:
+            del self.reference_fingerprints[sid]
+        
+        # Add merged fingerprints under target name
+        self.reference_fingerprints[target_name] = merged_fingerprints
+        
+        # Update session speakers mapping
+        for dg_id, speaker_id in list(self.session_speakers.items()):
+            if speaker_id in internal_ids:
+                self.session_speakers[dg_id] = target_name
+        
+        # Save to disk
+        self._save_reference_fingerprints()
+        
+        print(f"✅ [TITANET] Merged {len(internal_ids)} speakers -> '{target_name}' ({len(merged_fingerprints)} fingerprints)")
+        return True
 
     def _save_reference_fingerprints(self):
         """Save reference fingerprints to disk."""
