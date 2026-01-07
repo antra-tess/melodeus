@@ -287,6 +287,7 @@ director:
 # =============================================================================
 conversation:
   director_mode: "same_model"  # Options: "off", "same_model", "director"
+  default_character: "Haiku"   # Default character for same_model mode (uses first non-user if not set)
   conversation_mode: prefill   # Uses prefill format with character names
   max_tokens: 500
 

@@ -69,6 +69,9 @@ class ConversationState:
     last_ai_speaker: Optional[str] = None  # Last AI character that spoke (for same_model mode)
     current_generation: int = 0  # The active generation number
     speaker_lock: asyncio.Lock = field(default_factory=asyncio.Lock)  # Prevent concurrent speaker selection
+    # STT control
+    stt_enabled: bool = False  # Whether STT is currently active
+    mute_while_speaking: bool = True  # Mute input while AI is speaking
 
 
 class UnifiedVoiceConversation:
@@ -77,6 +80,9 @@ class UnifiedVoiceConversation:
     def __init__(self, config: VoiceAIConfig):
         self.config = config
         self.state = ConversationState()
+
+        # Initialize STT control settings from config
+        self.state.mute_while_speaking = config.conversation.mute_while_speaking
 
         self.llm_output_task = None
         
@@ -193,6 +199,9 @@ class UnifiedVoiceConversation:
                 "anthropic": config.conversation.anthropic_api_key,
                 "deepgram": config.conversation.deepgram_api_key,
                 "elevenlabs": config.conversation.elevenlabs_api_key
+            },
+            "conversation": {
+                "default_character": config.conversation.default_character
             }
         }
         
@@ -240,10 +249,12 @@ class UnifiedVoiceConversation:
                 }
                 for ctx in config.contexts.contexts
             ]
+            print(f"🔍 DEBUG: Loading {len(contexts_list)} contexts from config: {[c['name'] for c in contexts_list]}", flush=True)
             self.context_manager = ContextManager(
                 contexts_config=contexts_list,
                 state_dir=config.contexts.state_dir
             )
+            print(f"🔍 DEBUG: ContextManager has {len(self.context_manager.contexts)} contexts: {list(self.context_manager.contexts.keys())}")
             self.context_manager.auto_save_enabled = config.contexts.auto_save_enabled
             self.context_manager.auto_save_interval = config.contexts.auto_save_interval
         
@@ -1294,12 +1305,17 @@ class UnifiedVoiceConversation:
         self._show_config_summary()
         
         try:
-            # Start STT
-            print("🎤 Starting speech recognition...")
-            if not await self.stt.start_listening():
-                print("❌ Failed to start STT")
-                return False
-            
+            # Start STT only if configured to start enabled
+            if self.config.conversation.stt_start_enabled:
+                print("🎤 Starting speech recognition...")
+                if not await self.stt.start_listening():
+                    print("❌ Failed to start STT")
+                    return False
+                self.state.stt_enabled = True
+            else:
+                print("🎤 Speech recognition ready (disabled by default - enable via UI)")
+                self.state.stt_enabled = False
+
             self.state.is_active = True
             
             # Start conversation management
@@ -1566,7 +1582,13 @@ class UnifiedVoiceConversation:
                 )
             else:
                 next_speaker = speaker
-             
+
+            # Validate that the character exists
+            if not self.character_manager.get_character_config(next_speaker):
+                print(f"❌ Cannot respond as unknown character: {next_speaker}")
+                await self.thinking_sound.interrupt()
+                return
+
             messages, character_config, stop_sequences, request_filename = self.get_llm_context(next_speaker, request_timestamp)
             original_config = self._set_character_voice(character_config)
             print("Got context")
@@ -1588,7 +1610,8 @@ class UnifiedVoiceConversation:
                 text_stream,
                 stop_thinking_for_generation,
                 self.osc_client,
-                self.config.osc.speaking_start_address
+                self.config.osc.speaking_start_address,
+                pending_message_id
             )
             self.speak_text_task = asyncio.create_task(speak_text)
             print("waiting for speak text")
@@ -1700,6 +1723,12 @@ class UnifiedVoiceConversation:
     
     async def _on_utterance_complete(self, result, skip_processing: bool = False):
         """Handle completed utterances from STT."""
+        # Check if we should ignore input while AI is actually playing audio
+        # Only mute once TTS has started - allow input during processing/buffering phase
+        if self.state.mute_while_speaking and self.tts.is_currently_playing():
+            print(f"🔇 Ignoring utterance while AI is speaking (mute_while_speaking enabled): {result.text[:50]}...")
+            return
+
         # Use speaker name if available from voice fingerprinting, otherwise fall back to speaker ID
         ui_speaker_name = result.speaker_name
 
@@ -1715,6 +1744,21 @@ class UnifiedVoiceConversation:
         )
         self._add_turn_to_history(user_turn)  # This assigns turn.id = "msg_{index}"
         self._log_conversation_turn("user", result.text, speaker_name=result.speaker_name)
+
+        # Save user audio to archive if enabled
+        if (self.config.conversation.audio_archive_enabled and
+            self.config.conversation.audio_archive_dir and
+            hasattr(self, 'stt') and hasattr(self.stt, 'voice_fingerprinter') and
+            self.stt.voice_fingerprinter and
+            result.audio_window_start is not None and
+            result.audio_window_end is not None):
+            self.stt.voice_fingerprinter.save_audio_for_archive(
+                message_id=user_turn.id,
+                start_frames=result.audio_window_start,
+                end_frames=result.audio_window_end,
+                archive_dir=self.config.conversation.audio_archive_dir,
+                sample_rate=self.config.stt.sample_rate
+            )
 
         # Broadcast AFTER adding to history so we use the correct msg_N ID
         if hasattr(self, 'ui_server'):
@@ -1946,6 +1990,7 @@ class UnifiedVoiceConversation:
             self.logger.debug(f"Utterance added to history")
     
     async def _on_interim_result(self, result):
+        """Handle interim transcription results for real-time display."""
 
         if result.speaker_name:
             ui_speaker_name = result.speaker_name
@@ -1953,16 +1998,23 @@ class UnifiedVoiceConversation:
             ui_speaker_name = f"Speaker {result.speaker_id}"
         else:
             ui_speaker_name = "USER"
-        
-        # Broadcast to UI
+
+        # Broadcast to UI (always show what's being heard)
         if hasattr(self, 'ui_server'):
             await self.ui_server.broadcast_transcription(
                 speaker=ui_speaker_name,
                 text=result.text,
                 is_interim=True
             )
+
+        # Handle interruptions - but respect mute_while_speaking if TTS is actually playing
         if self.config.conversation.interruptions_enabled:
-           await self._interrupt_llm_output()            
+            # Only allow interruption if mute_while_speaking is off OR TTS hasn't started playing yet
+            if not self.state.mute_while_speaking or not self.tts.is_currently_playing():
+                await self._interrupt_llm_output()
+            else:
+                # Mute is on and TTS is playing - don't interrupt
+                pass
         return
         
         """Handle interim results for showing progress and immediate interruption."""
@@ -2569,7 +2621,13 @@ class UnifiedVoiceConversation:
                         '''
                     # Create TTS task for the prepared statement
                     self.state.current_llm_task = asyncio.create_task(
-                        self.tts.speak_text(prepared_text_generator(), stop_thinking_for_generation)
+                        self.tts.speak_text(
+                            prepared_text_generator(),
+                            stop_thinking_for_generation,
+                            self.osc_client,
+                            self.config.osc.speaking_start_address,
+                            pending_message_id
+                        )
                     )
                     
                     # Wait for completion
@@ -2613,7 +2671,10 @@ class UnifiedVoiceConversation:
                     self.state.current_llm_task = asyncio.create_task(
                         self.tts.speak_text(
                             self._stream_character_openai_response(messages, character_config, request_timestamp, ui_session_id, pending_message_id),
-                            stop_thinking_for_generation
+                            stop_thinking_for_generation,
+                            self.osc_client,
+                            self.config.osc.speaking_start_address,
+                            pending_message_id
                         )
                     )
                     
@@ -2659,7 +2720,10 @@ class UnifiedVoiceConversation:
                     self.state.current_llm_task = asyncio.create_task(
                         self.tts.speak_text(
                             self._stream_character_anthropic_response(messages, character_config, request_timestamp, ui_session_id, pending_message_id),
-                            stop_thinking_for_generation
+                            stop_thinking_for_generation,
+                            self.osc_client,
+                            self.config.osc.speaking_start_address,
+                            pending_message_id
                         )
                     )
                     
@@ -2710,7 +2774,10 @@ class UnifiedVoiceConversation:
                     self.state.current_llm_task = asyncio.create_task(
                         self.tts.speak_text(
                             self._stream_character_bedrock_response(messages, character_config, request_timestamp, ui_session_id, pending_message_id),
-                            stop_thinking_for_generation
+                            stop_thinking_for_generation,
+                            self.osc_client,
+                            self.config.osc.speaking_start_address,
+                            pending_message_id
                         )
                     )
                     
@@ -3765,9 +3832,18 @@ class UnifiedVoiceConversation:
         await self._process_with_character_llm(user_input, reference_turn, generation)
     async def _speak_text(self, text: str):
         """Speak a simple text message."""
+        async def text_generator():
+            yield text
+
         try:
             self.state.is_speaking = True
-            result = await self.tts.speak_text(text)
+            result = await self.tts.speak_text(
+                text_generator(),
+                None,  # first_audio_callback
+                self.osc_client,
+                self.config.osc.speaking_start_address,
+                None  # message_id - not tracked
+            )
             
             # Log Whisper tracking for testing
             spoken_heuristic = self.tts.get_spoken_text_heuristic().strip()
