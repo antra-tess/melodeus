@@ -196,6 +196,7 @@ class VoiceAIConfig:
     echo_filter: Optional[EchoFilterConfig] = None
     osc: Optional[OSCConfig] = None
     contexts: Optional[ContextsConfig] = None
+    _raw_config: Dict[str, Any] = field(default_factory=dict)  # Store raw YAML for custom sections
 
 def deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
     """
@@ -384,7 +385,8 @@ class ConfigLoader:
             enable_speaker_id=stt_config_data.get('enable_speaker_id', False),
             speaker_profiles_path=stt_config_data.get('speaker_profiles_path'),
             keywords=keywords,
-            debug_speaker_data=stt_config_data.get('debug_speaker_data', False)
+            debug_speaker_data=stt_config_data.get('debug_speaker_data', False),
+            save_user_audio=stt_config_data.get('save_user_audio', False)
         )
         
         # Create TTS configuration
@@ -576,7 +578,8 @@ class ConfigLoader:
             camera=camera_config,
             echo_filter=echo_filter_config,
             osc=osc_config,
-            contexts=contexts_config
+            contexts=contexts_config,
+            _raw_config=config_data  # Store raw config for custom sections like flic
         )
 
         try:
