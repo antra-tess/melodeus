@@ -126,7 +126,22 @@
             font-size: 11px;
             color: #aaa;
         }
-        
+
+        .slider-row {
+            display: flex;
+            flex-direction: column;
+            padding: 4px 0;
+            font-size: 11px;
+            color: #aaa;
+            gap: 4px;
+        }
+
+        .slider-row input[type="range"] {
+            width: 100%;
+            height: 4px;
+            cursor: pointer;
+        }
+
         .toggle-switch {
             width: 32px;
             height: 16px;
@@ -537,6 +552,15 @@
                 </div>
                 <button class="sidebar-btn danger" onclick="forceInterrupt()">🛑 Force Interrupt</button>
                 <button class="sidebar-btn" onclick="resetFingerprints()">🔄 Reset Voices</button>
+                <div class="toggle-row">
+                    <span>Learning Mode</span>
+                    <div class="toggle-switch on" id="learning-mode-toggle" onclick="toggleLearningMode()"></div>
+                </div>
+                <div class="slider-row">
+                    <span>Threshold: <span id="threshold-value">0.50</span></span>
+                    <input type="range" id="threshold-slider" min="0.30" max="0.80" step="0.05" value="0.50"
+                           onchange="updateThreshold(this.value)" oninput="document.getElementById('threshold-value').textContent = parseFloat(this.value).toFixed(2)">
+                </div>
     </div>
     
             <div class="sidebar-section" id="learned-speakers-section" style="display: none;">
@@ -591,6 +615,7 @@
         let lastAiSpeaker = null;
         let availableCharacters = [];
         let currentMessages = {};
+        let streamAccumulators = {};  // Track accumulated text per session for streaming
         let messageCount = 0;
         let isConnected = false;
         let learnedSpeakers = [];
@@ -708,6 +733,9 @@
                     learnedSpeakers = msg.data.speakers || [];
                     updateLearnedSpeakersUI();
                     break;
+                case 'fingerprint_settings':
+                    updateFingerprintSettings(msg.data);
+                    break;
                 case 'speaker_renamed':
                     learnedSpeakers = msg.data.known_speakers || [];
                     updateLearnedSpeakersUI();
@@ -807,7 +835,7 @@
         function handleAIStream(data) {
             const transcript = document.getElementById('transcript');
             let msg = currentMessages[data.session_id];
-            
+
             if (!msg) {
                 // Create new message
                 msg = document.createElement('div');
@@ -820,17 +848,23 @@
                 if (data.message_id) msg.id = data.message_id;
                 transcript.appendChild(msg);
                 currentMessages[data.session_id] = msg;
+                streamAccumulators[data.session_id] = '';  // Initialize accumulator
             }
-            
-            // Update content
+
+            // Accumulate text (append new chunk)
+            if (data.text) {
+                streamAccumulators[data.session_id] = (streamAccumulators[data.session_id] || '') + data.text;
+            }
+
+            // Update content with accumulated text
             const content = msg.querySelector('.message-content');
             if (content) {
-                content.textContent = data.text;
+                content.textContent = streamAccumulators[data.session_id] || '';
             }
-            
+
             // Scroll to bottom
             transcript.scrollTop = transcript.scrollHeight;
-            
+
             // If complete, add actions and clean up
             if (data.is_complete) {
                 if (data.message_id) msg.id = data.message_id;
@@ -845,6 +879,7 @@
                     msg.appendChild(actions);
                 }
                 delete currentMessages[data.session_id];
+                delete streamAccumulators[data.session_id];  // Clean up accumulator
                 messageCount++;
                 document.getElementById('message-count').textContent = messageCount;
             }
@@ -878,14 +913,19 @@
                 msg.id = data.message_id;
                 document.getElementById('transcript').appendChild(msg);
                 currentMessages[data.session_id] = msg;
+                streamAccumulators[data.session_id] = '';  // Initialize accumulator
+            }
+            // Accumulate text
+            if (data.text) {
+                streamAccumulators[data.session_id] = (streamAccumulators[data.session_id] || '') + data.text;
             }
             const content = msg.querySelector('.message-content');
             if (content) {
-            content.textContent += data.text;
+                content.textContent = streamAccumulators[data.session_id] || '';
                 document.getElementById('transcript').scrollTop = document.getElementById('transcript').scrollHeight;
             }
         }
-        
+
         function handleAIStreamEnd(data) {
             const msg = currentMessages[data.session_id];
             if (msg) {
@@ -897,6 +937,7 @@
                 `;
                 msg.appendChild(actions);
                 delete currentMessages[data.session_id];
+                delete streamAccumulators[data.session_id];  // Clean up accumulator
                 messageCount++;
                 document.getElementById('message-count').textContent = messageCount;
             }
@@ -1065,14 +1106,14 @@
                     const opt = document.createElement('option');
                     opt.value = ctx.name;
                     opt.textContent = ctx.name;
-                    if (ctx.active) opt.selected = true;
+                    if (ctx.is_active) opt.selected = true;
                     selector.appendChild(opt);
                 });
             }
         }
         
         function updateActiveContext(data) {
-            document.getElementById('context-selector').value = data.name;
+            document.getElementById('context-selector').value = data.context_name;
         }
         
         function switchContext(name) {
@@ -1155,7 +1196,51 @@
                 }
             }
         }
-        
+
+        let learningModeEnabled = true;
+
+        function toggleLearningMode() {
+            learningModeEnabled = !learningModeEnabled;
+            const toggle = document.getElementById('learning-mode-toggle');
+            if (learningModeEnabled) {
+                toggle.classList.add('on');
+            } else {
+                toggle.classList.remove('on');
+            }
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({
+                    type: 'set_learning_mode',
+                    data: { enabled: learningModeEnabled }
+                }));
+            }
+        }
+
+        function updateThreshold(value) {
+            const threshold = parseFloat(value);
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({
+                    type: 'set_fingerprint_threshold',
+                    data: { threshold: threshold }
+                }));
+            }
+        }
+
+        function updateFingerprintSettings(data) {
+            if (data.learning_mode !== undefined) {
+                learningModeEnabled = data.learning_mode;
+                const toggle = document.getElementById('learning-mode-toggle');
+                if (learningModeEnabled) {
+                    toggle.classList.add('on');
+                } else {
+                    toggle.classList.remove('on');
+                }
+            }
+            if (data.threshold !== undefined) {
+                document.getElementById('threshold-slider').value = data.threshold;
+                document.getElementById('threshold-value').textContent = data.threshold.toFixed(2);
+            }
+        }
+
         // LEARNED SPEAKERS
         function updateLearnedSpeakersUI() {
             const section = document.getElementById('learned-speakers-section');

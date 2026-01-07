@@ -10,6 +10,8 @@ import librosa
 import pickle
 import time
 import os
+import threading
+import queue
 from pathlib import Path
 from collections import deque
 from dataclasses import dataclass
@@ -67,44 +69,58 @@ class TitaNetVoiceFingerprinter:
     discriminative than traditional MFCC features.
     """
     
-    def __init__(self, speakers_config, fingerprints_path: str = "titanet_fingerprints.pkl", debug_save_audio=False, verbose=False):
+    def __init__(self, speakers_config, fingerprints_path: str = "titanet_fingerprints.pkl", debug_save_audio=False, save_user_audio=False, verbose=False):
         """Initialize TitaNet voice fingerprinting system."""
         self.verbose = verbose
         if self.verbose:
             print("🔊 [TITANET] Initializing TitaNet voice fingerprinting system")
-        
+
         if not NEMO_AVAILABLE:
             raise ImportError("NVIDIA NeMo toolkit is required for TitaNet fingerprinting")
-        
+
         self.speakers_config = speakers_config
         self.fingerprints_path = fingerprints_path
         self.sample_rate = 16000
         self.debug_save_audio = debug_save_audio
+        self.save_user_audio = save_user_audio
         self.debug_counter = 0
-        self.debug_dir = Path("testouput")
-        
+        self.user_audio_counter = 0
+        self.debug_dir = Path("debug_audio_segments")
+        self.user_audio_dir = Path("user_audio_segments")
+
         # Configuration
         self.confidence_threshold = speakers_config.recognition.confidence_threshold
         self.learning_mode = speakers_config.recognition.learning_mode
         self.max_speakers = speakers_config.recognition.max_speakers
         self.max_fingerprints_per_speaker = 20  # Limit to prevent memory issues
-        
+
+        # Callback for UI updates when speakers change
+        self.on_speakers_changed = None  # Set by websocket server
+
         # Audio buffering for real-time processing
         self.audio_buffer = deque()
-        
+
         # Speaker fingerprints: {speaker_profile_id: [TitaNetFingerprint, ...]}
         self.reference_fingerprints: Dict[str, List[TitaNetFingerprint]] = {}
-        
+
         # Session speaker mapping (Deepgram speaker ID -> profile name)
         self.session_speakers: Dict[int, str] = {}
         self.unknown_speaker_count = 0
-        
-        # Setup debug directory if needed
+
+        # Setup directories
         if debug_save_audio:
-            print(f"🐛 [TITANET] Debug mode: Will save extracted audio segments")
-            self.debug_dir = Path("debug_audio_segments")
+            print(f"🐛 [TITANET] Debug mode: Will save ALL audio segments (async)")
             self.debug_dir.mkdir(exist_ok=True)
-        
+        if save_user_audio:
+            print(f"🎤 [TITANET] Will save recognized user audio (async)")
+            self.user_audio_dir.mkdir(exist_ok=True)
+
+        # Background audio writer (non-blocking disk I/O)
+        self._audio_write_queue = queue.Queue()
+        self._audio_writer_thread = None
+        if debug_save_audio or save_user_audio:
+            self._start_audio_writer()
+
         # Initialize TitaNet model
         self._load_titanet_model()
         #self._load_wespeaker_model()
@@ -164,6 +180,56 @@ class TitaNetVoiceFingerprinter:
         """Clear the audio buffer. Call this when STT connection resets."""
         self.audio_buffer.clear()
         print("🔄 [TITANET] Audio buffer cleared for new session")
+
+    def _start_audio_writer(self):
+        """Start background thread for async audio file writing."""
+        def writer_loop():
+            while True:
+                try:
+                    item = self._audio_write_queue.get()
+                    if item is None:  # Shutdown signal
+                        break
+                    filepath, audio_data, sample_rate = item
+                    self._write_wav_file(filepath, audio_data, sample_rate)
+                except Exception as e:
+                    print(f"⚠️ [TITANET] Async audio write error: {e}")
+
+        self._audio_writer_thread = threading.Thread(target=writer_loop, daemon=True)
+        self._audio_writer_thread.start()
+        print("🔧 [TITANET] Background audio writer started")
+
+    def _write_wav_file(self, filepath: Path, audio_data: np.ndarray, sample_rate: int):
+        """Write audio data to WAV file (called from background thread)."""
+        try:
+            pcm16 = (audio_data * 32767).astype(np.int16)
+            with wave.open(str(filepath), 'wb') as wf:
+                wf.setnchannels(1)
+                wf.setsampwidth(2)
+                wf.setframerate(sample_rate)
+                wf.writeframes(pcm16.tobytes())
+        except Exception as e:
+            print(f"⚠️ [TITANET] Failed to write {filepath}: {e}")
+
+    def _queue_audio_save(self, filename: str, audio_data: np.ndarray, sample_rate: int):
+        """Queue debug audio for async saving (non-blocking)."""
+        if not self.debug_save_audio:
+            return
+        filepath = self.debug_dir / filename
+        # Make a copy since the original array might be reused
+        self._audio_write_queue.put((filepath, audio_data.copy(), sample_rate))
+
+    def _queue_user_audio_save(self, speaker_name: str, audio_data: np.ndarray, sample_rate: int):
+        """Queue recognized user audio for async saving (non-blocking)."""
+        if not self.save_user_audio:
+            return
+        self.user_audio_counter += 1
+        # Clean speaker name for filename
+        safe_name = speaker_name.replace(" ", "_").replace("/", "-")
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        filename = f"{safe_name}_{timestamp}_{self.user_audio_counter:04d}.wav"
+        filepath = self.user_audio_dir / filename
+        # Make a copy since the original array might be reused
+        self._audio_write_queue.put((filepath, audio_data.copy(), sample_rate))
 
     def add_audio_chunk(self, audio_data: np.ndarray, num_frames_before_this: int, sample_rate: int):
         """Add raw audio data to the circular buffer for later processing."""
@@ -256,29 +322,18 @@ class TitaNetVoiceFingerprinter:
             if fingerprint is None:
                 continue
             
-            if self.debug_save_audio or True:
+            if self.debug_save_audio:
                 debug_filename = f"segment_{self.debug_counter:03d}_speaker_{voice_segment.speaker_id}_{len(resampled_speaker_audio)}samples.wav"
-                debug_path = self.debug_dir / debug_filename
                 self.debug_counter += 1
-                
-                # Save audio with proper format
-                import soundfile as sf
                 audio = np.clip(np.array(resampled_speaker_audio), -1.0, 1.0)
-                pcm16 = (audio * 32767).astype(np.int16)
+                self._queue_audio_save(debug_filename, audio, self.sample_rate)
 
-                with wave.open(str(debug_path), "wb") as wf:
-                    wf.setnchannels(1)                    # audio is mono
-                    wf.setsampwidth(2)                    # int16 -> 2 bytes
-                    wf.setframerate(self.sample_rate)
-                    wf.writeframes(pcm16.tobytes())
-                print(f"writing debug audio to {debug_filename}")
-            
             # Try to match against known speakers
             matched_id = self._match_speaker(fingerprint)
             if matched_id:
                 print(f"✅ [TITANET] Matched speaker {speaker_id} to {matched_id}")
                 self.session_speakers[speaker_id] = matched_id
-                
+
                 # Add to reference fingerprints for continued learning
                 if self.learning_mode:
                     self._add_reference_fingerprint(matched_id, fingerprint)
@@ -289,9 +344,19 @@ class TitaNetVoiceFingerprinter:
                     print(f"👤 [TITANET] Learning new speaker: {matched_id}")
                 else:
                     print(f"❓ [TITANET] Unknown speaker {speaker_id} (learning disabled)")
-            
-            # Unknown speaker - return friendly name
-            if matched_id.startswith("unknown_speaker_"):
+
+            # Save user audio if we have a recognized speaker
+            if matched_id is not None:
+                audio = np.clip(np.array(resampled_speaker_audio), -1.0, 1.0)
+                display_name = matched_id
+                if matched_id.startswith("unknown_speaker_"):
+                    display_name = f"User_{matched_id.replace('unknown_speaker_', '')}"
+                self._queue_user_audio_save(display_name, audio, self.sample_rate)
+
+            # Return friendly name
+            if matched_id is None:
+                return "User"
+            elif matched_id.startswith("unknown_speaker_"):
                 count = matched_id.replace("unknown_speaker_", "")
                 return f"User {count}"
             else:
@@ -420,7 +485,7 @@ class TitaNetVoiceFingerprinter:
             #    return None
             '''
             # Debug: Save original audio if enabled
-            if self.debug_save_audio or True:
+            if self.debug_save_audio:
                 self.debug_counter += 1
                 debug_filename = f"segment_{self.debug_counter:03d}_speaker_{voice_segment.speaker_id}_{len(audio_data)}samples.wav"
                 debug_path = self.debug_dir / debug_filename
@@ -598,13 +663,17 @@ class TitaNetVoiceFingerprinter:
         """Handle a new unknown speaker."""
         self.unknown_speaker_count += 1
         new_speaker_id = f"unknown_speaker_{self.unknown_speaker_count}"
-        
+
         # Create new profile
         self.session_speakers[deepgram_speaker_id] = new_speaker_id
-        
+
         # Add first fingerprint
         self._add_reference_fingerprint(new_speaker_id, fingerprint)
-        
+
+        # Notify UI of new speaker
+        if self.on_speakers_changed:
+            self.on_speakers_changed()
+
         return new_speaker_id
     
     def get_speaker_name(self, deepgram_speaker_id: int) -> Optional[str]:

@@ -120,6 +120,9 @@ class ConversationContext:
             # Prepare state data
             history_data = []
             for turn in self.current_history:
+                # Skip deleted messages
+                if getattr(turn, 'status', None) == 'deleted':
+                    continue
                 # Handle timestamp - could be datetime or float
                 if isinstance(turn.timestamp, datetime):
                     timestamp_str = turn.timestamp.isoformat()
