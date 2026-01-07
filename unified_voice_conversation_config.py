@@ -29,6 +29,7 @@ from websocket_ui_server import VoiceUIServer, UIMessage
 from echo_filter import EchoFilter
 from context_manager import ContextManager
 from mel_aec_audio import stop_stream # needed for shutdown
+from flic_button_listener import FlicButtonListener, load_flic_config
 
 INTERRUPTED_STR = "[Interrupted by user]"
 
@@ -170,7 +171,19 @@ class UnifiedVoiceConversation:
             else:
                 print("⚠️ Failed to start camera, continuing without camera capture")
                 self.camera = None
-        
+
+        # Initialize Flic button listener if configured
+        self.flic_listener: Optional[FlicButtonListener] = None
+        if hasattr(config, '_raw_config') and 'flic' in config._raw_config:
+            flic_config = load_flic_config(config._raw_config)
+            if flic_config.enabled:
+                self.flic_listener = FlicButtonListener(
+                    config=flic_config,
+                    on_interrupt=self._flic_interrupt,
+                    on_trigger=self._flic_trigger_character
+                )
+                print(f"🎮 Flic button listener configured on port {flic_config.port}")
+
         # Initialize character manager (always use character mode)
         characters_config = {
             "characters": config.conversation.characters_config or {},
@@ -268,7 +281,10 @@ class UnifiedVoiceConversation:
         
         # Set up STT callbacks
         self._setup_stt_callbacks()
-        
+
+        # Set up fingerprinter callback for UI updates
+        self._setup_fingerprinter_callback()
+
         # Apply logging configuration
         self._setup_logging()
         
@@ -606,6 +622,7 @@ class UnifiedVoiceConversation:
             "conversation_history": [
                 self._serialize_conversation_turn(turn)
                 for turn in self.state.conversation_history
+                if getattr(turn, 'status', None) != 'deleted'
             ],
             "state": {
                 "current_generation": self.state.current_generation,
@@ -1241,7 +1258,33 @@ class UnifiedVoiceConversation:
         
         # Handle errors
         self.stt.on(STTEventType.ERROR, self._on_error)
-    
+
+    def _setup_fingerprinter_callback(self):
+        """Set up callback for fingerprinter to notify UI when speakers change."""
+        if hasattr(self, 'stt') and hasattr(self.stt, 'voice_fingerprinter'):
+            fingerprinter = self.stt.voice_fingerprinter
+            if fingerprinter:
+                def on_speakers_changed():
+                    # Schedule async broadcast on the event loop
+                    import asyncio
+                    try:
+                        loop = asyncio.get_event_loop()
+                        if loop.is_running():
+                            loop.create_task(self._broadcast_learned_speakers())
+                    except Exception as e:
+                        print(f"⚠️ Error broadcasting speakers change: {e}")
+                fingerprinter.on_speakers_changed = on_speakers_changed
+                print("🔗 Fingerprinter callback connected to UI")
+
+    async def _broadcast_learned_speakers(self):
+        """Broadcast updated learned speakers list to all UI clients."""
+        if hasattr(self, 'ui_server') and hasattr(self, 'stt') and hasattr(self.stt, 'voice_fingerprinter'):
+            fingerprinter = self.stt.voice_fingerprinter
+            if fingerprinter:
+                speakers = fingerprinter.get_known_speakers()
+                from websocket_ui_server import UIMessage
+                await self.ui_server.broadcast(UIMessage("learned_speakers", {"speakers": speakers}))
+
     async def start_conversation(self):
         """Start the voice conversation system."""
         print("🎙️ Starting Unified Voice Conversation System (YAML Config)")
@@ -1264,11 +1307,15 @@ class UnifiedVoiceConversation:
             
             # Start UI server
             asyncio.create_task(self.ui_server.start())
-            
+
+            # Start Flic button listener if configured
+            if self.flic_listener:
+                await self.flic_listener.start()
+
             # Start context auto-save if enabled
             if self.context_manager:
                 await self.context_manager.start_auto_save()
-            
+
             print("✅ Conversation system active!")
             print("💡 Tips:")
             print("   - Speak naturally and pause when done")
@@ -1627,6 +1674,24 @@ class UnifiedVoiceConversation:
                 self.llm_output_task = None
         except asyncio.CancelledError:
             pass # intentional
+
+    async def _flic_interrupt(self):
+        """Handle interrupt from Flic button."""
+        print("🎮 Flic INTERRUPT - stopping all output")
+        # Stop TTS
+        if self.tts and self.tts.is_currently_playing():
+            await self.tts.interrupt()
+        # Cancel LLM
+        await self._interrupt_llm_output()
+
+    async def _flic_trigger_character(self, character: str):
+        """Handle character trigger from Flic button."""
+        print(f"🎮 Flic TRIGGER - activating {character}")
+        # First interrupt any ongoing output
+        await self._flic_interrupt()
+        # Then trigger the character
+        await self._get_llm_output(character)
+
     async def _get_llm_output(self, speaker=None):
         await self._interrupt_llm_output()        
         self.llm_output_task = asyncio.create_task(self._get_llm_output_helper(speaker))

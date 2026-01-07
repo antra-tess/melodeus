@@ -157,6 +157,16 @@ class VoiceUIServer:
                 # Reset voice fingerprint database
                 await self.handle_reset_fingerprints()
 
+            elif msg_type == "set_learning_mode":
+                # Toggle learning mode for voice fingerprinting
+                enabled = data.get("enabled", True)
+                await self.handle_set_learning_mode(enabled)
+
+            elif msg_type == "set_fingerprint_threshold":
+                # Update confidence threshold for voice fingerprinting
+                threshold = data.get("threshold", 0.5)
+                await self.handle_set_fingerprint_threshold(threshold)
+
             elif msg_type == "rename_speaker":
                 # Rename a learned speaker
                 old_id = data.get("old_id")
@@ -201,7 +211,7 @@ class VoiceUIServer:
                 
             elif msg_type == "switch_context":
                 # Switch to a different context
-                context_name = message.get("context_name")
+                context_name = data.get("context_name")
                 print(f"🔄 Received switch_context request: {context_name}")
                 if context_name:
                     await self.handle_switch_context(context_name)
@@ -690,6 +700,9 @@ class VoiceUIServer:
             
         history = []
         for i, turn in enumerate(self.conversation.state.conversation_history):
+            # Skip deleted messages
+            if getattr(turn, 'status', None) == 'deleted':
+                continue
             # Convert each turn to a format suitable for UI
             # Handle timestamp serialization
             timestamp = getattr(turn, 'timestamp', time.time())
@@ -731,7 +744,7 @@ class VoiceUIServer:
         """Send list of learned speakers to a client."""
         if not self.conversation:
             return
-        
+
         try:
             if hasattr(self.conversation, 'stt') and hasattr(self.conversation.stt, 'voice_fingerprinter'):
                 fingerprinter = self.conversation.stt.voice_fingerprinter
@@ -739,8 +752,27 @@ class VoiceUIServer:
                     speakers = fingerprinter.get_known_speakers()
                     msg = UIMessage("learned_speakers", {"speakers": speakers})
                     await websocket.send(msg.to_json())
+                    # Also send fingerprint settings
+                    await self.send_fingerprint_settings(websocket)
         except Exception as e:
             print(f"⚠️ Error sending learned speakers: {e}")
+
+    async def send_fingerprint_settings(self, websocket):
+        """Send fingerprint settings to a client."""
+        if not self.conversation:
+            return
+
+        try:
+            if hasattr(self.conversation, 'stt') and hasattr(self.conversation.stt, 'voice_fingerprinter'):
+                fingerprinter = self.conversation.stt.voice_fingerprinter
+                if fingerprinter:
+                    msg = UIMessage("fingerprint_settings", {
+                        "learning_mode": fingerprinter.learning_mode,
+                        "threshold": fingerprinter.confidence_threshold
+                    })
+                    await websocket.send(msg.to_json())
+        except Exception as e:
+            print(f"⚠️ Error sending fingerprint settings: {e}")
     
     async def handle_edit_message(self, msg_id: str, new_text: str):
         """Handle message edit request."""
@@ -838,6 +870,44 @@ class VoiceUIServer:
                 print("⚠️ Voice fingerprinting not enabled")
         except Exception as e:
             self.logger.error(f"Error resetting fingerprints: {e}")
+            await self.send_error(None, str(e))
+
+    async def handle_set_learning_mode(self, enabled: bool):
+        """Toggle learning mode for voice fingerprinting."""
+        if not self.conversation:
+            return
+
+        try:
+            if hasattr(self.conversation, 'stt') and hasattr(self.conversation.stt, 'voice_fingerprinter'):
+                fingerprinter = self.conversation.stt.voice_fingerprinter
+                if fingerprinter:
+                    fingerprinter.learning_mode = enabled
+                    print(f"🎓 Learning mode {'enabled' if enabled else 'disabled'} via UI")
+                    await self.broadcast(UIMessage("fingerprint_settings", {
+                        "learning_mode": enabled,
+                        "threshold": fingerprinter.confidence_threshold
+                    }))
+        except Exception as e:
+            self.logger.error(f"Error setting learning mode: {e}")
+            await self.send_error(None, str(e))
+
+    async def handle_set_fingerprint_threshold(self, threshold: float):
+        """Update confidence threshold for voice fingerprinting."""
+        if not self.conversation:
+            return
+
+        try:
+            if hasattr(self.conversation, 'stt') and hasattr(self.conversation.stt, 'voice_fingerprinter'):
+                fingerprinter = self.conversation.stt.voice_fingerprinter
+                if fingerprinter:
+                    fingerprinter.confidence_threshold = threshold
+                    print(f"🎚️ Fingerprint threshold set to {threshold:.2f} via UI")
+                    await self.broadcast(UIMessage("fingerprint_settings", {
+                        "learning_mode": fingerprinter.learning_mode,
+                        "threshold": threshold
+                    }))
+        except Exception as e:
+            self.logger.error(f"Error setting threshold: {e}")
             await self.send_error(None, str(e))
 
     async def handle_rename_speaker(self, old_id: str, new_name: str):
