@@ -20,6 +20,8 @@ import queue
 from typing import Optional, AsyncGenerator, Dict, Any, List, Tuple, Any
 from dataclasses import dataclass, field
 import numpy as np
+import scipy.io.wavfile as wavfile
+import os
 
 try:
     from mel_aec_audio import (
@@ -98,6 +100,8 @@ class TTSConfig:
     emotive_similarity_boost: float = 0.8
     # Audio output device
     output_device_name: Optional[str] = None  # None = default device, or specify device name
+    # Audio archiving
+    audio_archive_dir: Optional[str] = None  # Directory to save audio files for replay
 
 @dataclass
 class AlignmentData:
@@ -162,7 +166,29 @@ class AsyncTTSStreamer:
         self.config = config
         self.speak_task = None
         self.generated_text = ""
-    
+        self._archive_audio_buffer = []  # Accumulates audio for archiving
+        self._current_message_id = None
+
+    def _save_audio_archive(self, audio_data: np.ndarray, message_id: str):
+        """Save audio to archive directory as WAV file."""
+        if not self.config.audio_archive_dir or not message_id:
+            return
+
+        try:
+            # Create ai subdirectory
+            ai_dir = os.path.join(self.config.audio_archive_dir, "ai")
+            os.makedirs(ai_dir, exist_ok=True)
+
+            # Save as WAV file at 48kHz (playback sample rate)
+            filepath = os.path.join(ai_dir, f"{message_id}.wav")
+
+            # Convert float32 [-1, 1] to int16
+            audio_int16 = (audio_data * 32767).astype(np.int16)
+            wavfile.write(filepath, shared_sample_rate(), audio_int16)
+            print(f"Saved AI audio to {filepath}")
+        except Exception as e:
+            print(f"Error saving audio archive: {e}")
+
     def _get_voice_settings(self, is_emotive: bool) -> Dict[str, float]:
         """Get voice settings for regular or emotive speech."""
         if is_emotive:
@@ -223,6 +249,7 @@ class AsyncTTSStreamer:
         websocket = None
         self.alignments = []
         self.generated_text = ""
+        self._archive_audio_buffer = []  # Reset audio buffer for archiving
         osc_emit_task = None
         start_time_played = None
         try:
@@ -264,6 +291,9 @@ class AsyncTTSStreamer:
                     
                     # now send the audio, all in one piece
                     concat_data = np.concatenate(audio_datas)
+
+                    # Accumulate for archiving
+                    self._archive_audio_buffer.append(concat_data)
 
                     # see when it'll actually be played
                     current_time = time.time()
@@ -334,7 +364,12 @@ class AsyncTTSStreamer:
             # wait for buffered audio to drain (polling)
             while audio_stream.get_buffered_duration() > 0:
                 await asyncio.sleep(0.05)
-                
+
+            # Save accumulated audio to archive (only if completed successfully)
+            if self._archive_audio_buffer and self._current_message_id:
+                full_audio = np.concatenate(self._archive_audio_buffer)
+                self._save_audio_archive(full_audio, self._current_message_id)
+
         except asyncio.CancelledError:
             print(f"Cancelled tts, interrupting playback")
             # not enough audio played and interrupted, make empty
@@ -400,9 +435,12 @@ class AsyncTTSStreamer:
         #print(self.generated_text)
         return trimmed_end(self.generated_text, played_text)
 
-    async def speak_text(self, text_generator: AsyncGenerator[str, None], first_audio_callback, osc_client, osc_client_address):
+    async def speak_text(self, text_generator: AsyncGenerator[str, None], first_audio_callback, osc_client, osc_client_address, message_id: Optional[str] = None):
         # interrupt (if already running)
         await self.interrupt()
+
+        # Store message_id for audio archiving
+        self._current_message_id = message_id
 
         # start the task (this way it's cancellable and we don't need to spam checks)
         self.speak_task = asyncio.create_task(self._speak_text_helper(text_generator, first_audio_callback, osc_client, osc_client_address))

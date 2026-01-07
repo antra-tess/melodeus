@@ -74,13 +74,22 @@ class ConversationConfig:
     director_config: Optional[Dict[str, Any]] = None
     director_enabled: bool = False  # Default to disabled director (legacy)
     director_mode: str = "off"  # "off", "same_model", or "director"
-    
+    default_character: Optional[str] = None  # Default character for same_model mode (uses first non-user if not set)
+
+    # STT control settings
+    stt_start_enabled: bool = False  # Whether STT starts automatically (default: off)
+    mute_while_speaking: bool = True  # Mute input while AI is speaking (default: on)
+
     # Echo cancellation settings
     enable_echo_cancellation: bool = False
     aec_frame_size: int = 256  # Must be power of 2
     aec_filter_length: int = 2048
     aec_delay_ms: int = 200  # Reference delay in milliseconds (increased for bursty TTS)
-    
+
+    # Audio archive settings
+    audio_archive_enabled: bool = True  # Save all audio (user and AI) by default
+    audio_archive_dir: str = "./audio_archive"  # Directory for audio files
+
     def __post_init__(self):
         if self.prefill_participants is None:
             self.prefill_participants = ['H', 'Claude']
@@ -390,6 +399,11 @@ class ConfigLoader:
         )
         
         # Create TTS configuration
+        # Get audio archive directory if enabled
+        audio_archive_dir = None
+        if conversation_config_data.get('audio_archive_enabled', True):
+            audio_archive_dir = conversation_config_data.get('audio_archive_dir', './audio_archive')
+
         tts_config = TTSConfig(
             api_key=api_keys['elevenlabs'],
             voice_id=voice_config.get('id', 'T2KZm9rWPG5TgXTyjt7E'),
@@ -407,7 +421,9 @@ class ConfigLoader:
             emotive_stability=tts_config_data.get('emotive_stability', 0.5),
             emotive_similarity_boost=tts_config_data.get('emotive_similarity_boost', 0.8),
             # Audio output device
-            output_device_name=tts_config_data.get('output_device_name')
+            output_device_name=tts_config_data.get('output_device_name'),
+            # Audio archiving
+            audio_archive_dir=audio_archive_dir
         )
         
         # Create conversation configuration
@@ -454,6 +470,11 @@ class ConfigLoader:
             aec_frame_size=conversation_config_data.get('aec_frame_size', 256),
             aec_filter_length=conversation_config_data.get('aec_filter_length', 2048),
             aec_delay_ms=conversation_config_data.get('aec_delay_ms', 200),
+            default_character=conversation_config_data.get('default_character'),
+            stt_start_enabled=conversation_config_data.get('stt_start_enabled', False),
+            mute_while_speaking=conversation_config_data.get('mute_while_speaking', True),
+            audio_archive_enabled=conversation_config_data.get('audio_archive_enabled', True),
+            audio_archive_dir=conversation_config_data.get('audio_archive_dir', './audio_archive'),
         )
         
         # Create other configurations

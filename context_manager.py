@@ -173,11 +173,20 @@ class ConversationContext:
             print(f"❌ Error saving state for context '{self.config.name}': {e}")
             return False
     
-    def reset_to_original(self):
-        """Reset current history to original loaded history."""
+    def reset_to_original(self) -> bool:
+        """Reset current history to original loaded history.
+
+        Returns:
+            True if reset was performed, False if original history is empty
+        """
+        if not self.original_history:
+            print(f"⚠️ Cannot reset context '{self.config.name}': no original history loaded (history file may not exist)")
+            return False
+
         self.current_history = self.original_history.copy()
         self.is_modified = True
-        print(f"🔄 Reset context '{self.config.name}' to original history")
+        print(f"🔄 Reset context '{self.config.name}' to original history ({len(self.original_history)} turns)")
+        return True
     
     def add_turn(self, turn: ConversationTurn):
         """Add a new turn to the conversation."""
@@ -330,9 +339,11 @@ class ContextManager:
         """Reset the active context to its original history."""
         context = self.get_active_context()
         if context:
-            context.reset_to_original()
-            # Save immediately after reset
-            context.save_state()
+            # Only save if reset succeeded (original history exists)
+            if context.reset_to_original():
+                context.save_state()
+            else:
+                print(f"⚠️ Reset failed - not saving empty state")
     
     def load_original_histories(self, parse_history_func):
         """Load original histories for all contexts using the provided parse function."""
