@@ -658,6 +658,9 @@
                 case 'transcription':
                     updateTranscription(msg.data);
                     break;
+                case 'ai_stream':
+                    handleAIStream(msg.data);
+                    break;
                 case 'ai_stream_start':
                     handleAIStreamStart(msg.data);
                     break;
@@ -796,6 +799,52 @@
                 if (data.message_id) msg.id = data.message_id;
                 transcript.appendChild(msg);
                 transcript.scrollTop = transcript.scrollHeight;
+                messageCount++;
+                document.getElementById('message-count').textContent = messageCount;
+            }
+        }
+        
+        function handleAIStream(data) {
+            const transcript = document.getElementById('transcript');
+            let msg = currentMessages[data.session_id];
+            
+            if (!msg) {
+                // Create new message
+                msg = document.createElement('div');
+                msg.className = 'message ai';
+                msg.setAttribute('data-session-id', data.session_id);
+                msg.innerHTML = `
+                    <div class="speaker-name">${data.speaker}</div>
+                    <div class="message-content"></div>
+                `;
+                if (data.message_id) msg.id = data.message_id;
+                transcript.appendChild(msg);
+                currentMessages[data.session_id] = msg;
+            }
+            
+            // Update content
+            const content = msg.querySelector('.message-content');
+            if (content) {
+                content.textContent = data.text;
+            }
+            
+            // Scroll to bottom
+            transcript.scrollTop = transcript.scrollHeight;
+            
+            // If complete, add actions and clean up
+            if (data.is_complete) {
+                if (data.message_id) msg.id = data.message_id;
+                const existingActions = msg.querySelector('.message-actions');
+                if (!existingActions) {
+                    const actions = document.createElement('div');
+                    actions.className = 'message-actions';
+                    actions.innerHTML = `
+                        <button onclick="editMessage('${data.message_id}')">✏️</button>
+                        <button onclick="deleteMessage('${data.message_id}')">🗑️</button>
+                    `;
+                    msg.appendChild(actions);
+                }
+                delete currentMessages[data.session_id];
                 messageCount++;
                 document.getElementById('message-count').textContent = messageCount;
             }
