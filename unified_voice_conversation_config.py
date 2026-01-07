@@ -66,6 +66,7 @@ class ConversationState:
     # Global speaker management
     next_speaker: Optional[str] = None  # Who should speak next
     current_speaker: Optional[str] = None  # Who is currently speaking  
+    last_ai_speaker: Optional[str] = None  # Last AI character that spoke (for same_model mode)
     current_generation: int = 0  # The active generation number
     speaker_lock: asyncio.Lock = field(default_factory=asyncio.Lock)  # Prevent concurrent speaker selection
 
@@ -266,7 +267,7 @@ class UnifiedVoiceConversation:
             self.echo_filter = None
         
         # Initialize UI server
-        ui_port = config.ui_port if hasattr(config, 'ui_port') else 8765
+        ui_port = config.ui_port if hasattr(config, 'ui_port') else 8795
         self.ui_server = VoiceUIServer(self, host='0.0.0.0', port=ui_port)
         
         # Show appropriate message
@@ -625,6 +626,7 @@ class UnifiedVoiceConversation:
                 "pending_tool_response": self.state.pending_tool_response,
                 "next_speaker": self.state.next_speaker,
                 "current_speaker": self.state.current_speaker,
+                "last_ai_speaker": self.state.last_ai_speaker,
                 "is_processing_llm": self.state.is_processing_llm,
                 "is_speaking": self.state.is_speaking,
             },
@@ -695,6 +697,7 @@ class UnifiedVoiceConversation:
             self.state.pending_tool_response = state_data.get("pending_tool_response")
             self.state.next_speaker = state_data.get("next_speaker")
             self.state.current_speaker = state_data.get("current_speaker")
+            self.state.last_ai_speaker = state_data.get("last_ai_speaker")
             self.state.is_processing_llm = False
             self.state.is_speaking = False
             
@@ -1486,6 +1489,13 @@ class UnifiedVoiceConversation:
             stop_sequences.append("\n\nSystem:")
             stop_sequences.append("\n\nA:")
             
+            # Add User 1 through User 10
+            for i in range(1, 11):
+                stop_sequences.append(f"\n\nUser {i}:")
+            
+            # Add interrupted marker
+            stop_sequences.append("[Interrupted by user]")
+            
             # Remove duplicates while preserving order
             stop_sequences = list(dict.fromkeys(stop_sequences))
         # Log the request
@@ -1570,7 +1580,11 @@ class UnifiedVoiceConversation:
             import traceback
             print(traceback.print_exc())
             print("error in get llm output")
+            # Make sure thinking sound stops on any error
+            await self.thinking_sound.interrupt()
         finally:
+            # Safety: always stop thinking sound when exiting
+            await self.thinking_sound.interrupt()
             print("finalizae get llm output")
             if original_config is not None:
                 self._restore_voice_config(original_config)
@@ -1682,11 +1696,30 @@ class UnifiedVoiceConversation:
                 message_id=user_turn.id  # Use the assigned turn.id, not the STT result UUID
             )
 
-        if self.config.conversation.director_enabled:
-            print("Getting llm output")
+        # Get director mode (supports legacy director_enabled boolean)
+        director_mode = getattr(self.config.conversation, 'director_mode', None)
+        if director_mode is None:
+            director_mode = "director" if self.config.conversation.director_enabled else "off"
+        
+        if director_mode == "director":
+            print("Getting llm output (director mode)")
             await self._get_llm_output()
-
-        return
+            return
+        elif director_mode == "same_model":
+            # Use the last AI character that spoke
+            if self.state.last_ai_speaker:
+                print(f"Getting llm output (same_model mode) - using {self.state.last_ai_speaker}")
+                self.state.next_speaker = self.state.last_ai_speaker
+                await self._get_llm_output(speaker=self.state.last_ai_speaker)
+            else:
+                # No previous speaker set, use default
+                default_speaker = self.character_manager.get_default_character()
+                print(f"Getting llm output (same_model mode) - no previous, using default: {default_speaker}")
+                await self._get_llm_output(speaker=default_speaker)
+            return
+        else:
+            # director_mode == "off" - no automatic response
+            return
 
 
 
@@ -2255,10 +2288,14 @@ class UnifiedVoiceConversation:
                             next_speaker = reference_turn.metadata.get('triggered_speaker')
                             print(f"🎯 Using manually triggered speaker: {next_speaker}")
                     
-                    # If no manual trigger, check if director is enabled
+                    # If no manual trigger, check director mode
                     if not next_speaker:
-                        # Check if director is enabled
-                        if self.config.conversation.director_enabled:
+                        # Get director mode (supports legacy director_enabled boolean)
+                        director_mode = getattr(self.config.conversation, 'director_mode', None)
+                        if director_mode is None:
+                            director_mode = "director" if self.config.conversation.director_enabled else "off"
+                        
+                        if director_mode == "director":
                             # Pass detected speakers to character manager for validation
                             if hasattr(self, 'detected_speakers'):
                                 self.character_manager._detected_speakers = self.detected_speakers
@@ -2266,6 +2303,15 @@ class UnifiedVoiceConversation:
                             next_speaker = await self.character_manager.select_next_speaker(
                                 self._get_conversation_history_for_director()
                             )
+                        elif director_mode == "same_model":
+                            # Use the last AI character that spoke
+                            if self.state.last_ai_speaker:
+                                next_speaker = self.state.last_ai_speaker
+                                print(f"🔄 Same model mode - using {next_speaker}")
+                            else:
+                                # No previous speaker, use first character
+                                next_speaker = self.character_manager.get_default_character()
+                                print(f"🔄 Same model mode - no previous, using default: {next_speaker}")
                         else:
                             # Director is disabled, default to USER
                             next_speaker = "USER"
@@ -2273,6 +2319,10 @@ class UnifiedVoiceConversation:
                 
                 # Set as current speaker
                 self.state.current_speaker = next_speaker
+                # Track last AI speaker for same_model mode
+                if next_speaker and next_speaker != "USER" and not next_speaker.startswith("User"):
+                    self.state.last_ai_speaker = next_speaker
+                    print(f"📌 Tracking last AI speaker: {next_speaker}")
             
             # Broadcast pending speaker
             if hasattr(self, 'ui_server'):
@@ -2400,6 +2450,13 @@ class UnifiedVoiceConversation:
                 # Add System: to stop sequences
                 stop_sequences.append("\n\nSystem:")
                 stop_sequences.append("\n\nA:")
+                
+                # Add User 1 through User 10
+                for i in range(1, 11):
+                    stop_sequences.append(f"\n\nUser {i}:")
+                
+                # Add interrupted marker
+                stop_sequences.append("[Interrupted by user]")
                 
                 # Remove duplicates while preserving order
                 stop_sequences = list(dict.fromkeys(stop_sequences))
@@ -2733,20 +2790,33 @@ class UnifiedVoiceConversation:
                 
                 self._character_depth += 1
                 if self._character_depth < 3:  # Max 3 characters in a row
-                    # Use director to determine next speaker if needed
+                    # Use director mode to determine next speaker if needed
                     async with self.state.speaker_lock:
-                        if not self.state.next_speaker and self.config.conversation.director_enabled:
-                            # Director determines next speaker
-                            if hasattr(self, 'detected_speakers'):
-                                self.character_manager._detected_speakers = self.detected_speakers
-                            self.state.next_speaker = await self.character_manager.select_next_speaker(
-                                self._get_conversation_history_for_director()
-                            )
-                            print(f"🎭 Director selected next speaker: {self.state.next_speaker}")
-                        elif not self.state.next_speaker:
-                            # No director, default to USER
-                            self.state.next_speaker = "USER"
-                            print(f"📢 No director - next speaker set to USER")
+                        # Get director mode (supports legacy director_enabled boolean)
+                        director_mode = getattr(self.config.conversation, 'director_mode', None)
+                        if director_mode is None:
+                            director_mode = "director" if self.config.conversation.director_enabled else "off"
+                        
+                        if not self.state.next_speaker:
+                            if director_mode == "director":
+                                # Director determines next speaker
+                                if hasattr(self, 'detected_speakers'):
+                                    self.character_manager._detected_speakers = self.detected_speakers
+                                self.state.next_speaker = await self.character_manager.select_next_speaker(
+                                    self._get_conversation_history_for_director()
+                                )
+                                print(f"🎭 Director selected next speaker: {self.state.next_speaker}")
+                            elif director_mode == "same_model":
+                                # Keep the last AI character
+                                if self.state.last_ai_speaker:
+                                    self.state.next_speaker = self.state.last_ai_speaker
+                                    print(f"🔄 Same model - continuing with: {self.state.next_speaker}")
+                                else:
+                                    self.state.next_speaker = "USER"
+                            else:
+                                # No director, default to USER
+                                self.state.next_speaker = "USER"
+                                print(f"📢 No director - next speaker set to USER")
                     
                     # Continue with the same generation number
                     await self._process_with_character_llm("", reference_turn, generation)
@@ -2904,6 +2974,13 @@ class UnifiedVoiceConversation:
                 # Add System: to stop sequences
                 stop_sequences.append("\n\nSystem:")
                 stop_sequences.append("\n\nA:")
+                
+                # Add User 1 through User 10
+                for i in range(1, 11):
+                    stop_sequences.append(f"\n\nUser {i}:")
+                
+                # Add interrupted marker
+                stop_sequences.append("[Interrupted by user]")
                 
                 # Remove duplicates while preserving order
                 stop_sequences = list(dict.fromkeys(stop_sequences))
@@ -3078,9 +3155,10 @@ class UnifiedVoiceConversation:
                 stop_sequences = list(dict.fromkeys(stop_sequences))
                 print(f"🛑 Character using stop sequences: {stop_sequences}")
             
-            # For Bedrock, model names start with "anthropic."
+            # For Bedrock, model names start with "anthropic." or "us.anthropic." (cross-region)
             model_name = character_config.llm_model
-            if not model_name.startswith("anthropic."):
+            # Only prepend anthropic. if the model doesn't already have the right prefix
+            if not model_name.startswith("anthropic.") and not model_name.startswith("us.anthropic."):
                 model_name = f"anthropic.{model_name}"
             
             # Prepare parameters for Bedrock - remove None values as Bedrock doesn't like them
