@@ -1,116 +1,388 @@
-# Voice AI System Configuration
+# Melodeus Voice AI System Configuration
+# ========================================
 # Copy this file to config.yaml and fill in your API keys
+#
+# This example shows a multi-character setup with various Claude models,
+# speaker identification, director mode, and Flic button integration.
 
+# =============================================================================
 # API Keys
+# =============================================================================
 api_keys:
   deepgram: "your_deepgram_api_key_here"
-  elevenlabs: "your_elevenlabs_api_key_here" 
+  elevenlabs: "your_elevenlabs_api_key_here"
   openai: "your_openai_api_key_here"
+  anthropic: "your_anthropic_api_key_here"
 
-# Voice Settings
-voice:
-  id: "T2KZm9rWPG5TgXTyjt7E"  # Catalyst voice (default)
-  # Other popular voices:
-  # "pNInz6obpgDQGcFmaJgB"  # Rachel
-  # "yjJ45q8TVCrtMhEKurxY"  # Von Fusion
-  # "EXAVITQu4vr4xnSDxMaL"  # Sarah
-  # "21m00Tcm4TlvDq8ikWAM"  # Rachel (alternative)
+  # AWS credentials for Bedrock (optional - for running Claude models via AWS)
+  aws_access_key_id: "your_aws_access_key_id_here"
+  aws_secret_access_key: "your_aws_secret_access_key_here"
+  aws_region: "us-west-2"
 
-# Speech-to-Text Settings  
-stt:
-  model: "nova-3"
-  language: "en-US"
-  sample_rate: 16000
-  chunk_size: 8000
-  interim_results: true
-  punctuate: true
-  diarize: true
-  utterance_end_ms: 1000
-  vad_events: true
-  enable_speaker_id: true
-  speaker_profiles_path: "speaker_profiles"
-  debug_speaker_data: true  # Show detailed word-level timing and speaker info
-
-# Speaker Configuration
+# =============================================================================
+# Speaker Identification (TitaNet voice fingerprinting)
+# =============================================================================
 speakers:
-  # Configure known speakers you want the system to recognize
-  # Provide 30+ second reference audio samples for each person
-  profiles:
-    "user_primary":
-      name: "Alice"
-      description: "Primary user"
-      reference_audio: "speaker_profiles/alice_reference.wav"  # 30+ seconds of clean speech
-    "user_secondary": 
-      name: "Bob"
-      description: "Secondary user or colleague"
-      reference_audio: "speaker_profiles/bob_reference.wav"    # 30+ seconds of clean speech
-    "user_guest":
-      name: "Guest"
-      description: "Occasional participant"
-      reference_audio: null  # No reference - will be learned automatically
-  
-  # Speaker recognition settings
+  profiles: {}  # Profiles are learned automatically when learning_mode is enabled
   recognition:
-    confidence_threshold: 0.7  # Minimum confidence for speaker identification
-    learning_mode: true        # Whether to learn new speakers automatically
-    max_speakers: 4           # Maximum number of speakers to track
-    voice_fingerprint_length: 128  # Size of voice fingerprint vector
+    confidence_threshold: 0.35  # Lower = more lenient matching (0.3-0.7 typical)
+    learning_mode: true         # Automatically learn new speaker voices
+    max_speakers: 10            # Maximum speakers to track
 
-# Text-to-Speech Settings
-tts:
-  model_id: "eleven_multilingual_v2"
-  output_format: "pcm_22050"
-  sample_rate: 22050
-  speed: 1.0
-  stability: 0.5
-  similarity_boost: 0.8
-  chunk_size: 1024
-  buffer_size: 2048
+# =============================================================================
+# Characters (AI Models)
+# =============================================================================
+# Each character can use a different model, voice, and settings.
+# Characters can have per-character API keys for special access (e.g., research programs)
 
-# Conversation Management
+characters:
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Claude 3 Opus (Legacy - requires research access API key)
+  # ─────────────────────────────────────────────────────────────────────────────
+  Opus:
+    llm_provider: anthropic
+    llm_model: claude-3-opus-20240229
+    # api_key: "sk-ant-research-xxx..."  # Optional: per-character API key for research access
+
+    voice_id: "wiZYl9Y7z2Yjt3B2855A"
+    voice_settings:
+      speed: 1.0
+      stability: 0.5
+      similarity_boost: 0.8
+
+    prefill_name: "Claude 3 Opus"  # Name used in conversation prefill
+    max_tokens: 500
+    temperature: 1
+    max_images: 5
+    max_prompt_tokens: 30000
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Claude Opus 4.5 (Latest Opus)
+  # ─────────────────────────────────────────────────────────────────────────────
+  Opus45:
+    llm_provider: anthropic
+    llm_model: claude-opus-4-5-20251101
+
+    voice_id: "YhGRNgsnYVp2CHIZ8CFi"
+    voice_settings:
+      speed: 0.85
+      stability: 0.7
+      similarity_boost: 0.25
+
+    prefill_name: "Claude Opus 4.5"
+    max_tokens: 500
+    temperature: 1
+    max_images: 8
+    max_prompt_tokens: 150000
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Claude Opus 4.1
+  # ─────────────────────────────────────────────────────────────────────────────
+  Opus41:
+    llm_provider: anthropic
+    llm_model: claude-opus-4-1-20250805
+
+    voice_id: "CjPYdterpTuryBOzcFdv"
+    voice_settings:
+      speed: 0.75
+      stability: 0.5
+      similarity_boost: 0.25
+
+    prefill_name: "Claude Opus 4.1"
+    max_tokens: 500
+    temperature: 1
+    max_images: 8
+    max_prompt_tokens: 150000
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Claude Opus 4
+  # ─────────────────────────────────────────────────────────────────────────────
+  Opus4:
+    llm_provider: anthropic
+    llm_model: claude-opus-4-20250514
+
+    voice_id: "V5STUAe76ca8posPJP3S"
+    voice_settings:
+      speed: 1.1
+      stability: 0.37
+      similarity_boost: 0.75
+
+    prefill_name: "Claude Opus 4"
+    max_tokens: 500
+    temperature: 1
+    max_images: 8
+    max_prompt_tokens: 30000
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Claude Sonnet 4.5
+  # ─────────────────────────────────────────────────────────────────────────────
+  Sonnet45:
+    llm_provider: anthropic
+    llm_model: claude-sonnet-4-5-20250929
+
+    voice_id: "pFZP5JQG7iQjIQuC4Bku"
+    voice_settings:
+      speed: 1.0
+      stability: 0.5
+      similarity_boost: 0.6
+
+    prefill_name: "Claude Sonnet 4.5"
+    max_tokens: 500
+    temperature: 1
+    max_images: 8
+    max_prompt_tokens: 150000
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Claude Sonnet 4
+  # ─────────────────────────────────────────────────────────────────────────────
+  Sonnet4:
+    llm_provider: anthropic
+    llm_model: claude-sonnet-4-20250514
+
+    voice_id: "54Cze5LrTSyLgbO6Fhlc"
+    voice_settings:
+      speed: 1.1
+      stability: 0.5
+      similarity_boost: 0.8
+
+    prefill_name: "Claude Sonnet 4"
+    max_tokens: 500
+    temperature: 1
+    max_images: 8
+    max_prompt_tokens: 150000
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Claude 3.7 Sonnet
+  # ─────────────────────────────────────────────────────────────────────────────
+  Sonnet37:
+    llm_provider: anthropic
+    llm_model: claude-3-7-sonnet-20250219
+
+    voice_id: "ryouGctXYbwINJpdpmVJ"
+    voice_settings:
+      speed: 1.1
+      stability: 0.5
+      similarity_boost: 0.8
+
+    prefill_name: "Claude37"
+    max_tokens: 500
+    temperature: 1
+    max_images: 8
+    max_prompt_tokens: 30000
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Claude 3.5 Sonnet v2 (via Bedrock)
+  # ─────────────────────────────────────────────────────────────────────────────
+  Sonnet36:
+    llm_provider: bedrock
+    llm_model: us.anthropic.claude-3-5-sonnet-20241022-v2:0
+
+    voice_id: "esy0r39YPLQjOczyOib8"
+    voice_settings:
+      speed: 1.1
+      stability: 0.5
+      similarity_boost: 0.8
+
+    prefill_name: "Supreme Sonnet"
+    max_tokens: 500
+    temperature: 1
+    max_images: 8
+    max_prompt_tokens: 30000
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Claude 3.5 Sonnet v1 (via Bedrock)
+  # ─────────────────────────────────────────────────────────────────────────────
+  Sonnet35:
+    llm_provider: bedrock
+    llm_model: us.anthropic.claude-3-5-sonnet-20240620-v1:0
+
+    voice_id: "Ky9j3wxFbp3dSAdrkOEv"
+    voice_settings:
+      speed: 1.1
+      stability: 0.5
+      similarity_boost: 0.8
+
+    prefill_name: "Claude1"
+    max_tokens: 500
+    temperature: 1
+    max_images: 8
+    max_prompt_tokens: 30000
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Claude Haiku 4.5
+  # ─────────────────────────────────────────────────────────────────────────────
+  Haiku45:
+    llm_provider: anthropic
+    llm_model: claude-haiku-4-5-20251001
+
+    voice_id: "MEJe6hPrI48Kt2lFuVe3"
+    voice_settings:
+      speed: 1.0
+      stability: 0.5
+      similarity_boost: 0.5
+
+    prefill_name: "Claude Haiku 4.5"
+    max_tokens: 500
+    temperature: 1
+    max_images: 8
+    max_prompt_tokens: 50000
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Claude 3.5 Haiku
+  # ─────────────────────────────────────────────────────────────────────────────
+  Haiku:
+    llm_provider: anthropic
+    llm_model: claude-3-5-haiku-20241022
+
+    voice_id: "weA4Q36twV5kwSaTEL0Q"
+    voice_settings:
+      speed: 1.1
+      stability: 0.5
+      similarity_boost: 0.8
+
+    prefill_name: "CL-KU"
+    max_tokens: 500
+    temperature: 1
+    max_images: 8
+    max_prompt_tokens: 30000
+
+# =============================================================================
+# Speech-to-Text Settings
+# =============================================================================
+stt:
+  enable_speaker_id: true  # Enable TitaNet voice fingerprinting
+  keywords:
+    - word: "Opus"
+      weight: 2.0
+    - word: "Claude"
+      weight: 2.0
+    - word: "Sonnet"
+      weight: 2.0
+    - word: "Haiku"
+      weight: 2.0
+
+# =============================================================================
+# Director (AI Orchestration)
+# =============================================================================
+# The director selects which AI character should respond next.
+# Options: "off", "same_model" (last speaker continues), "director" (separate LLM decides)
+
+director:
+  llm_provider: groq  # Use Groq for low-latency director decisions
+  llm_model: llama-3.3-70b-versatile
+  api_key: "your_groq_api_key_here"
+  max_prompt_tokens: 20000
+
+  system_prompt: |
+    You are directing a conversation between multiple AIs and human participants.
+    The dialogue should be dynamic. Infer when participants are addressing each
+    other even when it's not mentioned directly and let them speak.
+    If you sense that the user wants to stop or pause the conversation, return None.
+
+    Available participants:
+    {participants}
+
+# =============================================================================
+# Conversation Settings
+# =============================================================================
 conversation:
+  director_mode: "same_model"  # Options: "off", "same_model", "director"
+  conversation_mode: prefill   # Uses prefill format with character names
+  max_tokens: 500
+
+  # History file for conversation context
+  history_file: "conversation_history.md"
+
   # Timing settings
-  pause_threshold: 2.0        # seconds of silence before LLM submission
-  min_words_for_submission: 3 # minimum words before submitting
-  max_wait_time: 10.0         # maximum time to wait before force submission
-  
-  # Interruption settings
-  interruptions_enabled: false  # whether voice interruptions are allowed (default: false)
-  interruption_confidence: 0.8 # minimum confidence for interruption
-  
-  # Director settings
-  director_enabled: false       # whether director is enabled to select speakers (default: false)
-  
-  # Echo cancellation settings
-  enable_echo_cancellation: false  # enable acoustic echo cancellation (requires speexdsp)
-  aec_frame_size: 256             # frame size for echo cancellation (must be power of 2)
-  aec_filter_length: 2048         # length of the echo cancellation filter
-  aec_delay_ms: 100               # reference delay in milliseconds to compensate for audio latency
-  
-  # LLM settings
-  llm_model: "chatgpt-4o-latest"
-  max_tokens: 300
-  system_prompt: "You are a helpful AI assistant in a voice conversation. Give natural, conversational responses that work well when spoken aloud. Keep responses concise but engaging."
+  pause_threshold: 3.0         # Seconds of silence before LLM submission
+  min_words_for_submission: 5  # Minimum words before submitting
+  max_wait_time: 15.0          # Maximum time to wait before force submission
 
-# Audio Device Settings (optional)
-audio:
-  input_device_name: null   # null for default microphone, or specify device name like "Scarlett 18i20"
-  output_device_name: null  # null for default speakers, or specify device name like "Loopback Audio"
-  stream_sample_rate: 48000  # Shared mel-aec duplex stream sample rate (Hz)
-  stream_channels: 1         # Number of channels for shared stream
-  stream_buffer_size: 480    # Buffer size in samples (approx 10 ms at 48 kHz)
-  stream_enable_aec: null    # true/false to force enable/disable AEC, null to inherit conversation.enable_echo_cancellation
-  aec_filter_length: 2048    # Override AEC filter length (samples) if needed
+  # Echo cancellation
+  enable_echo_cancellation: false
+  aec_frame_size: 256
+  aec_filter_length: 2048
+  aec_delay_ms: 100
+  enable_thinking_sound: true  # Play sound while AI is thinking
 
-# Logging Settings
-logging:
-  level: "INFO"              # DEBUG, INFO, WARNING, ERROR
-  show_interim_results: true
-  show_tts_chunks: false
-  show_audio_debug: false
+# =============================================================================
+# Text-to-Speech Settings
+# =============================================================================
+tts:
+  model_id: eleven_multilingual_v2
+  emotive_speed: 1.2  # Speed for emotive voice (text in asterisks)
+  buffer_size: 256    # Lower = less latency
 
-# Development/Testing Settings
-development:
-  enable_debug_mode: false
-  test_mode: false
-  mock_apis: false 
+# =============================================================================
+# Default Voice (when not using character-specific voices)
+# =============================================================================
+voice:
+  id: "wiZYl9Y7z2Yjt3B2855A"
+  emotive_id: "ZD29qZCdYhhdqzBLRKNH"
+
+# =============================================================================
+# Camera Settings (optional)
+# =============================================================================
+camera:
+  enabled: false
+  device_id: 0
+  resolution: [640, 480]
+  capture_on_speech: true  # Capture image when user speaks
+  save_captures: false
+  capture_dir: "camera_captures"
+  jpeg_quality: 85
+
+# =============================================================================
+# OSC Settings (optional - for TouchDesigner/other integrations)
+# =============================================================================
+osc:
+  enabled: false
+  host: "127.0.0.1"
+  port: 7000
+  speaking_start_address: "/character/speaking/start"
+  speaking_stop_address: "/character/speaking/stop"
+
+# =============================================================================
+# Flic Button Integration (optional)
+# =============================================================================
+# Connect physical Flic buttons to trigger AI characters or interrupt.
+# Buttons are identified by their Bluetooth address (shown in logs when pressed).
+
+flic:
+  enabled: false
+  port: 11235
+  buttons:
+    # Default action for any unmapped button
+    default:
+      single_click: "trigger:Opus45"
+      double_click: "interrupt"
+      hold: "interrupt"
+
+    # Map specific buttons by Bluetooth address
+    # "XX:XX:XX:XX:XX:XX":
+    #   single_click: "trigger:Haiku45"
+    #   double_click: "trigger:Sonnet4"
+    #   hold: "interrupt"
+
+# =============================================================================
+# Conversation Contexts (optional)
+# =============================================================================
+# Define multiple conversation contexts with different histories per character.
+
+contexts:
+  enabled: true
+  state_dir: "./context_states"
+  auto_save_enabled: true
+  auto_save_interval: 30  # seconds
+  contexts:
+    - name: "default"
+      history_file: "default_history.md"
+      description: "Default conversation context"
+
+    # Example: per-character histories
+    # - name: "team_chat"
+    #   history_file: "team_intro.md"
+    #   description: "Multi-character team discussion"
+    #   character_histories:
+    #     Opus45: "opus_personal_history.md"
+    #     Sonnet4: "sonnet_personal_history.md"
