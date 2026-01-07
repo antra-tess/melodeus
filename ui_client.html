@@ -348,6 +348,14 @@
         .card-btn.next:hover { background: #AB47BC; }
         .card-btn.trigger { background: #2196F3; color: white; }
         .card-btn.trigger:hover { background: #42A5F5; }
+        .card-btn.trigger-large {
+            background: #2196F3;
+            color: white;
+            width: 100%;
+            padding: 8px 0;
+            font-size: 16px;
+        }
+        .card-btn.trigger-large:hover { background: #42A5F5; }
         
         @keyframes pulse {
             0%, 100% { opacity: 1; }
@@ -1055,12 +1063,13 @@
                 const card = document.createElement('div');
                 card.id = `${char.name.toLowerCase()}-card`;
                 card.className = 'speaker-card';
+                card.onclick = (e) => { if (e.target === card || e.target.tagName !== 'BUTTON') setNextAiSpeaker(char.name); };
+                card.style.cursor = 'pointer';
                 card.innerHTML = `
                     <h3>${char.name}</h3>
                     <span class="status-text">Idle</span>
                     <div class="card-actions">
-                        <button class="card-btn next" onclick="setNextAiSpeaker('${char.name}')">▶</button>
-                        <button class="card-btn trigger" onclick="triggerCharacter('${char.name}')">⚡</button>
+                        <button class="card-btn trigger-large" onclick="event.stopPropagation(); triggerCharacter('${char.name}')">▶</button>
                     </div>
                 `;
                 panel.appendChild(card);
@@ -1091,9 +1100,9 @@
         
         function triggerCharacter(character) {
             if (ws && ws.readyState === WebSocket.OPEN) {
-                ws.send(JSON.stringify({ 
-                    type: 'trigger_response',
-                    data: { character: character }
+                ws.send(JSON.stringify({
+                    type: 'trigger_speaker',
+                    data: { speaker: character }
                 }));
             }
         }
