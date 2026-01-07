@@ -195,6 +195,7 @@ class VoiceAIConfig:
     echo_filter: Optional[EchoFilterConfig] = None
     osc: Optional[OSCConfig] = None
     contexts: Optional[ContextsConfig] = None
+    _raw_config: Dict[str, Any] = field(default_factory=dict)  # Store raw YAML for custom sections
 
 def deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
     """
@@ -573,7 +574,8 @@ class ConfigLoader:
             camera=camera_config,
             echo_filter=echo_filter_config,
             osc=osc_config,
-            contexts=contexts_config
+            contexts=contexts_config,
+            _raw_config=config_data  # Store raw config for custom sections like flic
         )
 
         try:
