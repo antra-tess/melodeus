@@ -233,6 +233,17 @@ class VoiceUIServer:
                 # Reset current context to original history
                 await self.handle_reset_context()
 
+            elif msg_type == "duplicate_context":
+                # Duplicate current context as a new context
+                new_name = data.get("new_name")  # Optional custom name
+                await self.handle_duplicate_context(new_name)
+
+            elif msg_type == "delete_context":
+                # Delete a dynamic context
+                context_name = data.get("context_name")
+                if context_name:
+                    await self.handle_delete_context(context_name)
+
             elif msg_type == "restart":
                 # Restart the melodeus server
                 await self.handle_restart()
@@ -1106,6 +1117,8 @@ class VoiceUIServer:
             raw_data: dict = None
             message_id: str = None  # For edit tracking
             is_edit: bool = False  # Whether this is editing an existing message
+            audio_window_start: int = None  # For audio archiving (not used for text input)
+            audio_window_end: int = None  # For audio archiving (not used for text input)
             
         # Create a result that looks like it came from STT
         result = SyntheticTranscriptionResult(
@@ -1210,9 +1223,67 @@ class VoiceUIServer:
                 await self.send_conversation_history(ws)
             
             print("🔄 Reset context to original history")
-            
+
         except Exception as e:
             self.logger.error(f"Error resetting context: {e}")
+            await self.broadcast_error(str(e))
+
+    async def handle_duplicate_context(self, new_name: str = None):
+        """Duplicate current context as a new context."""
+        if not self.conversation or not self.conversation.context_manager:
+            return
+
+        try:
+            # Duplicate the active context
+            result_name = self.conversation.context_manager.duplicate_context(new_name=new_name)
+
+            if result_name:
+                # Broadcast context list update to all clients
+                contexts = self.conversation.context_manager.get_context_list()
+                msg = UIMessage("contexts_list", {"contexts": contexts})
+                await self.broadcast(msg)
+
+                # Notify about the new context
+                msg = UIMessage("context_duplicated", {
+                    "new_context": result_name,
+                    "message": f"Created new context '{result_name}'"
+                })
+                await self.broadcast(msg)
+
+                print(f"✅ Duplicated context as '{result_name}'")
+            else:
+                await self.broadcast_error("Failed to duplicate context")
+
+        except Exception as e:
+            self.logger.error(f"Error duplicating context: {e}")
+            await self.broadcast_error(str(e))
+
+    async def handle_delete_context(self, context_name: str):
+        """Delete a dynamic context."""
+        if not self.conversation or not self.conversation.context_manager:
+            return
+
+        try:
+            success = self.conversation.context_manager.delete_dynamic_context(context_name)
+
+            if success:
+                # Broadcast context list update to all clients
+                contexts = self.conversation.context_manager.get_context_list()
+                msg = UIMessage("contexts_list", {"contexts": contexts})
+                await self.broadcast(msg)
+
+                msg = UIMessage("context_deleted", {
+                    "context_name": context_name,
+                    "message": f"Deleted context '{context_name}'"
+                })
+                await self.broadcast(msg)
+
+                print(f"🗑️ Deleted context '{context_name}'")
+            else:
+                await self.broadcast_error(f"Cannot delete context '{context_name}'")
+
+        except Exception as e:
+            self.logger.error(f"Error deleting context: {e}")
             await self.broadcast_error(str(e))
 
     async def handle_restart(self):
