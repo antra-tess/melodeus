@@ -45,9 +45,13 @@ class CharacterConfig:
     
     # API key (can be character-specific)
     api_key: Optional[str] = None
-    
+
     # Prepared statements - pre-written responses that can be triggered
     prepared_statements: Dict[str, str] = field(default_factory=dict)
+
+    # Tools - list of tool names this character can use, or True for all tools
+    # None/False = no tools, list = specific tools, True = all tools
+    tools: Any = None
 
 
 @dataclass

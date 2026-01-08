@@ -65,7 +65,11 @@ class ConversationConfig:
     
     # History file settings
     history_file: Optional[str] = None
-    
+
+    # Known speakers whitelist for parsing external contexts
+    # Add speaker names here that should always be recognized even if they appear only once
+    known_speakers: Optional[List[str]] = None
+
     # Tools configuration
     tools_config: Optional[Dict[str, Any]] = None
     
@@ -180,6 +184,7 @@ class ContextConfig:
     description: Optional[str] = None
     metadata: Optional[Dict[str, Any]] = None
     character_histories: Optional[Dict[str, str]] = None
+    system_active_message: Optional[str] = None  # Message to inject after reset point when context becomes active
 
 
 @dataclass
@@ -460,6 +465,7 @@ class ConfigLoader:
             prefill_system_prompt=conversation_config_data.get('prefill_system_prompt', 
                 'The assistant is in CLI simulation mode, and responds to the user\'s CLI commands only with outputs of the commands.'),
             history_file=conversation_config_data.get('history_file'),
+            known_speakers=conversation_config_data.get('known_speakers'),
             tools_config=tools_config,
             characters_config=characters_config,
             director_config=director_config,
@@ -576,7 +582,8 @@ class ConfigLoader:
                     history_file=ctx_data['history_file'],
                     description=ctx_data.get('description'),
                     metadata=ctx_data.get('metadata', {}),
-                    character_histories=ctx_data.get('character_histories')
+                    character_histories=ctx_data.get('character_histories'),
+                    system_active_message=ctx_data.get('system_active_message')
                 )
                 context_list.append(context)
             

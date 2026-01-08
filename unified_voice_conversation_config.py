@@ -30,6 +30,10 @@ from echo_filter import EchoFilter
 from context_manager import ContextManager
 from mel_aec_audio import stop_stream # needed for shutdown
 from flic_button_listener import FlicButtonListener, load_flic_config
+from tool_parser import (
+    inject_tools_into_system, get_tool_stop_sequence, get_eot_token, parse_tool_calls,
+    format_tool_results, has_unclosed_tool_block, ToolDefinition, ToolResult as ParsedToolResult
+)
 
 INTERRUPTED_STR = "[Interrupted by user]"
 
@@ -245,7 +249,8 @@ class UnifiedVoiceConversation:
                     'history_file': ctx.history_file,
                     'description': ctx.description,
                     'metadata': ctx.metadata,
-                    'character_histories': ctx.character_histories
+                    'character_histories': ctx.character_histories,
+                    'system_active_message': ctx.system_active_message
                 }
                 for ctx in config.contexts.contexts
             ]
@@ -1041,126 +1046,151 @@ class UnifiedVoiceConversation:
         return prefill_response.strip()
 
     def _parse_history_file(self, file_path: str) -> List[Dict[str, str]]:
-        """Parse history file and convert to message format.
-        
-        Supports multi-speaker conversations. All speakers are preserved in the conversation
-        history for LLM context, but for voice interaction only the configured participants
-        are used for the actual conversation flow.
-        
+        """Parse history file and convert to message format using hybrid speaker detection.
+
+        Uses a two-pass approach:
+        1. First pass: collect speaker frequencies at line starts
+        2. Determine valid speakers: known AI + known humans + frequency 2+
+        3. Second pass: parse with valid speakers only
+
         Expected format:
         SpeakerName: message content
-        
         AnotherSpeaker: response content
-        
-        Returns messages with 'character' field for multi-character conversations.
+
+        Returns messages with '_speaker_name' field for multi-character conversations.
         """
+        from collections import Counter
+        import re
+
         try:
             with open(file_path, 'r', encoding='utf-8') as f:
                 content = f.read().strip()
-            
-            # Get configured participant names for the current voice conversation
+
+            # Get configured participant names
             human_name = self.config.conversation.prefill_participants[0]  # e.g., 'H'
             ai_name = self.config.conversation.prefill_participants[1]     # e.g., 'Claude 3 Opus'
-            
-            # Store all detected speakers for stop sequences
-            self.detected_speakers = set()
-            
-            import re
+
+            # Build known speakers whitelist
+            known_ai_speakers = set()
+            if hasattr(self, 'character_manager') and self.character_manager:
+                for char_name in self.character_manager.characters.keys():
+                    known_ai_speakers.add(char_name)
+                    char_config = self.character_manager.get_character_config(char_name)
+                    if char_config and char_config.prefill_name:
+                        known_ai_speakers.add(char_config.prefill_name)
+
+            # Known human speakers from config (if available) + common aliases
+            known_human_speakers = {'H', 'Human', 'User'}
+            if hasattr(self.config.conversation, 'known_speakers') and self.config.conversation.known_speakers:
+                known_human_speakers.update(self.config.conversation.known_speakers)
+
+            # FIRST PASS: collect speaker frequencies at line starts
+            speaker_counts = Counter()
+            lines = content.split('\n')
+
+            for line in lines:
+                stripped = line.strip()
+                if not stripped:
+                    continue
+
+                # Match "Speaker: content" at line start
+                match = re.match(r'^([^:]+):\s*(.*)$', stripped)
+                if match:
+                    potential_speaker = match.group(1).strip()
+                    # Basic validation: not too long
+                    if len(potential_speaker) <= 50:
+                        speaker_counts[potential_speaker] += 1
+
+            # DETERMINE VALID SPEAKERS using hybrid approach
+            valid_speakers = set()
+            for speaker, count in speaker_counts.items():
+                # Always accept known AI speakers
+                if speaker in known_ai_speakers:
+                    valid_speakers.add(speaker)
+                    continue
+
+                # Always accept known human speakers
+                if speaker in known_human_speakers:
+                    valid_speakers.add(speaker)
+                    continue
+
+                # Accept unknown speakers that appear 2+ times (frequency heuristic)
+                if count >= 2:
+                    valid_speakers.add(speaker)
+
+            # Store detected speakers for stop sequences
+            self.detected_speakers = valid_speakers.copy()
+
+            print(f"📊 Speaker detection - counts: {dict(speaker_counts.most_common(10))}")
+            print(f"📊 Valid speakers: {sorted(valid_speakers)}")
+
+            # SECOND PASS: parse messages with valid speakers only
             messages = []
             current_speaker = None
             current_content = []
-            
-            for line in content.split('\n'):
-                line = line.strip()
-                
-                # Match speaker pattern: "SpeakerName: content" but be much more restrictive
-                # Only match lines that look like actual speaker names, not formatting or bullet points
-                speaker_match = re.match(r'^([A-Za-z0-9_\s\.]+):\s*(.*)', line)
-                
-                if speaker_match:
-                    speaker_name = speaker_match.group(1).strip()
-                    message_content = speaker_match.group(2).strip()
-                    
-                    # Filter out obvious non-speaker patterns
-                    if self._is_valid_speaker_name(speaker_name):
-                        # Track all detected speakers
-                        self.detected_speakers.add(speaker_name)
-                        
-                        # Check if this is the same speaker continuing
-                        if speaker_name == current_speaker:
-                            # Same speaker - just add the message content (not the speaker name again)
-                            if message_content:
-                                current_content.append(message_content)
-                            # Skip empty continuations from same speaker
-                        else:
-                            # Different speaker - save previous and start new
-                            if current_speaker and current_content:
-                                # Determine role based on configured participants
-                                # For multi-speaker: classify as 'user' if it's the human participant,
-                                # otherwise as 'assistant' to preserve the conversation context
-                                role = "user" if current_speaker == human_name else "assistant"
-                                
-                                # In character mode, we need to preserve the character name separately
-                                full_content = '\n'.join(current_content).strip()
-                                
-                                message = {
-                                    "role": role,
-                                    "content": full_content
-                                }
-                                
-                                # Add character name if it's an assistant message and not the default AI
-                                if role == "assistant" and current_speaker != ai_name:
-                                    # Store the speaker name for later character matching
-                                    message["_speaker_name"] = current_speaker
-                                
-                                messages.append(message)
-                            
-                            # Start new message
-                            current_speaker = speaker_name
-                            current_content = [message_content] if message_content else []
-                    else:
-                        # Debug: log filtered speakers
-                        if "Unknown Speaker" in speaker_name:
-                            print(f"🚫 Filtered out speaker: '{speaker_name}' (validation failed)")
-                            # Additional debug for Unknown Speaker cases
-                            print(f"   Length: {len(speaker_name)} chars, Words: {len(speaker_name.split())}")
-                            invalid_chars = ['*', '[', ']', '(', ')', '"', "'"]
-                            has_invalid = any(char in speaker_name for char in invalid_chars)
-                            print(f"   Contains invalid chars: {has_invalid}")
-                        
-                        # Invalid speaker - treat as continuation of current message or skip
-                        if current_speaker:
-                            # Add the full line including the colon as continuation
-                            current_content.append(line)
-                        # If no current speaker, just skip the line
-                    
-                elif line and current_speaker:
-                    # Continue current message (current_speaker is already validated)
-                    current_content.append(line)
-                # Skip empty lines or lines without a speaker
-            
-            # Add final message if exists (current_speaker is already validated)
+
+            for line in lines:
+                stripped = line.strip()
+
+                if not stripped:
+                    if current_speaker:
+                        current_content.append('')
+                    continue
+
+                # Check for speaker change at line start
+                match = re.match(r'^([^:]+):\s*(.*)$', stripped)
+                if match:
+                    potential_speaker = match.group(1).strip()
+                    message_content = match.group(2).strip()
+
+                    if potential_speaker in valid_speakers:
+                        # Save previous message
+                        if current_speaker and current_content:
+                            role = "user" if current_speaker in known_human_speakers else "assistant"
+                            full_content = '\n'.join(current_content).strip()
+
+                            message = {
+                                "role": role,
+                                "content": full_content
+                            }
+
+                            # Add speaker name for character matching
+                            if role == "assistant" and current_speaker not in [ai_name, human_name]:
+                                message["_speaker_name"] = current_speaker
+
+                            messages.append(message)
+
+                        # Start new message
+                        current_speaker = potential_speaker
+                        current_content = [message_content] if message_content else []
+                        continue
+
+                # Content line - add to current message
+                if current_speaker:
+                    current_content.append(stripped)
+
+            # Save final message
             if current_speaker and current_content:
-                role = "user" if current_speaker == human_name else "assistant"
+                role = "user" if current_speaker in known_human_speakers else "assistant"
                 full_content = '\n'.join(current_content).strip()
-                
+
                 message = {
                     "role": role,
                     "content": full_content
                 }
-                
-                # Add character name if it's an assistant message and not the default AI
-                if role == "assistant" and current_speaker != ai_name:
-                    # Store the speaker name for later character matching
+
+                if role == "assistant" and current_speaker not in [ai_name, human_name]:
                     message["_speaker_name"] = current_speaker
-                
+
                 messages.append(message)
-            
-            print(f"📊 Detected speakers in history: {sorted(self.detected_speakers)}")
+
+            print(f"📊 Parsed {len(messages)} messages from history")
             return messages
-            
+
         except Exception as e:
             print(f"❌ Failed to parse history file {file_path}: {e}")
+            import traceback
+            traceback.print_exc()
             return []
 
     def _is_valid_speaker_name(self, speaker_name: str) -> bool:
@@ -1462,10 +1492,14 @@ class UnifiedVoiceConversation:
 
     def get_llm_context(self, next_speaker, request_timestamp):
         character_config = self.character_manager.get_character_config(next_speaker)
+
+        # Inject system message with tool instructions FIRST (before fetching history)
+        self._maybe_inject_system_message(character_config)
+
         # Check if we should use prefill format
-        use_prefill = (self.config.conversation.conversation_mode == "prefill" and 
+        use_prefill = (self.config.conversation.conversation_mode == "prefill" and
                         character_config.llm_provider in ["anthropic", "bedrock"])
-        
+
         if use_prefill:
             # For prefill mode, convert directly from raw history
             prefill_name = character_config.prefill_name or character_config.name
@@ -1506,11 +1540,30 @@ class UnifiedVoiceConversation:
                 self._get_conversation_history_for_character(),
                 context_char_histories
             )
-        
+
+        # Filter tool calls from context - each character only sees tools they have access to
+        # This prevents them from getting confused and trying to use tools they don't have
+        allowed_tools = self._get_character_tool_names(character_config)
+        for msg in messages:
+            content = msg.get("content")
+            if isinstance(content, str):
+                msg["content"] = self._strip_tool_calls_from_content(content, allowed_tools)
+            elif isinstance(content, list):
+                # Handle multi-part content (with images)
+                for i, part in enumerate(content):
+                    if isinstance(part, dict) and part.get("type") == "text":
+                        part["text"] = self._strip_tool_calls_from_content(part.get("text", ""), allowed_tools)
+                    elif isinstance(part, str):
+                        content[i] = self._strip_tool_calls_from_content(part, allowed_tools)
+
         # Check if we're in prefill format to generate stop sequences
         stop_sequences = None
         if self.config.conversation.conversation_mode == "prefill":
             stop_sequences = []
+
+            # EOT token - highest priority (prevents participant simulation)
+            stop_sequences.append(get_eot_token())
+
             # Add all character names as stop sequences
             for char_name in self.character_manager.characters.keys():
                 stop_sequences.append(f"\n\n{char_name}:")
@@ -1538,16 +1591,19 @@ class UnifiedVoiceConversation:
             # Add User 1 through User 10
             for i in range(1, 11):
                 stop_sequences.append(f"\n\nUser {i}:")
-            
+
             # Add interrupted marker
             stop_sequences.append("[Interrupted by user]")
-            
+
+            # Add tool stop sequences if this character has tools enabled
+            stop_sequences.extend(self._get_tool_stop_sequences_for_character(character_config))
+
             # Remove duplicates while preserving order
             stop_sequences = list(dict.fromkeys(stop_sequences))
         # Log the request
         request_filename = self._log_llm_request(
-            messages, 
-            character_config.llm_model, 
+            messages,
+            character_config.llm_model,
             request_timestamp,
             character_config.llm_provider,
             stop_sequences
@@ -2461,14 +2517,19 @@ class UnifiedVoiceConversation:
             self.state.current_ui_session_id = ui_session_id
             
             # Check if we should use prefill format
-            use_prefill = (self.config.conversation.conversation_mode == "prefill" and 
+            use_prefill = (self.config.conversation.conversation_mode == "prefill" and
                           character_config.llm_provider in ["anthropic", "bedrock"])
             
             if use_prefill:
                 # For prefill mode, convert directly from raw history
                 prefill_name = character_config.prefill_name or character_config.name
+
+                # Inject system message with tool instructions FIRST (before fetching history)
+                self._maybe_inject_system_message(character_config)
+
+                # Now get history (which includes any injected system message)
                 raw_history = self._get_conversation_history_for_character()
-                
+
                 # Get character histories from current context if available
                 context_char_histories = None
                 if self.context_manager:
@@ -2476,29 +2537,33 @@ class UnifiedVoiceConversation:
                     if active_context:
                         context_char_histories = active_context.character_histories
                         print(f"🔍 DEBUG: Active context '{active_context.config.name}' has character_histories: {list(context_char_histories.keys()) if context_char_histories else None}")
-                
+
                 print(f"🔍 DEBUG: Creating prefill messages for character '{next_speaker}' (prefill_name: '{prefill_name}')")
                 print(f"🔍 DEBUG: Context has character histories: {context_char_histories is not None}")
                 if context_char_histories:
                     print(f"🔍 DEBUG: Character histories available for: {list(context_char_histories.keys())}")
-                
+
                 # Create messages in prefill format directly
+                # Note: Tool instructions are now in the system message, not the system prompt
                 messages = self._create_character_prefill_messages(
-                    raw_history, 
-                    next_speaker, 
+                    raw_history,
+                    next_speaker,
                     prefill_name,
                     character_config.system_prompt,
                     context_char_histories
                 )
             else:
                 # Standard chat format
+                # Inject system message with tool instructions FIRST (before fetching history)
+                self._maybe_inject_system_message(character_config)
+
                 # Get character histories from current context if available
                 context_char_histories = None
                 if self.context_manager:
                     active_context = self.context_manager.get_active_context()
                     if active_context:
                         context_char_histories = active_context.character_histories
-                
+
                 messages = self.character_manager.format_messages_for_character(
                     next_speaker,
                     self._get_conversation_history_for_character(),
@@ -2509,6 +2574,10 @@ class UnifiedVoiceConversation:
             stop_sequences = None
             if self.config.conversation.conversation_mode == "prefill":
                 stop_sequences = []
+
+                # EOT token - highest priority (prevents participant simulation)
+                stop_sequences.append(get_eot_token())
+
                 # Add all character names as stop sequences
                 for char_name in self.character_manager.characters.keys():
                     stop_sequences.append(f"\n\n{char_name}:")
@@ -2516,12 +2585,12 @@ class UnifiedVoiceConversation:
                     char_config_temp = self.character_manager.get_character_config(char_name)
                     if char_config_temp and char_config_temp.prefill_name and char_config_temp.prefill_name != char_name:
                         stop_sequences.append(f"\n\n{char_config_temp.prefill_name}:")
-                
+
                 # Add human names
                 if hasattr(self.config.conversation, 'prefill_participants'):
                     human_name = self.config.conversation.prefill_participants[0]
                     stop_sequences.append(f"\n\n{human_name}:")
-                
+
                 # Add any detected speakers
                 if hasattr(self, 'detected_speakers') and self.detected_speakers:
                     for speaker in self.detected_speakers:
@@ -2536,17 +2605,20 @@ class UnifiedVoiceConversation:
                 # Add User 1 through User 10
                 for i in range(1, 11):
                     stop_sequences.append(f"\n\nUser {i}:")
-                
+
                 # Add interrupted marker
                 stop_sequences.append("[Interrupted by user]")
-                
+
+                # Add tool stop sequences if this character has tools enabled
+                stop_sequences.extend(self._get_tool_stop_sequences_for_character(character_config))
+
                 # Remove duplicates while preserving order
                 stop_sequences = list(dict.fromkeys(stop_sequences))
-            
+
             # Log the request
             request_filename = self._log_llm_request(
-                messages, 
-                character_config.llm_model, 
+                messages,
+                character_config.llm_model,
                 request_timestamp,
                 character_config.llm_provider,
                 stop_sequences
@@ -3001,14 +3073,20 @@ class UnifiedVoiceConversation:
                     message_id=pending_message_id
                 )
     
-    async def _stream_character_anthropic_response(self, messages, character_config, request_timestamp, ui_session_id: Optional[str] = None, pending_message_id: Optional[str] = None):
-        """Stream response from Anthropic for a specific character."""
+    async def _stream_character_anthropic_response(self, messages, character_config, request_timestamp, ui_session_id: Optional[str] = None, pending_message_id: Optional[str] = None, _tool_depth: int = 0):
+        """Stream response from Anthropic for a specific character.
+
+        Handles XML-based tool calls with continuation - if the model stops on a tool call,
+        executes the tools and continues streaming with results injected via prefill.
+        """
+        MAX_TOOL_DEPTH = 10  # Prevent infinite tool loops
+
         client = self.character_manager.get_character_client(character_config.name)
         ui_session_id = ui_session_id or f"session_{request_timestamp}"
 
         # Create session ID for echo tracking
         session_id = f"anthropic_{character_config.name}_{request_timestamp}"
-        if self.echo_filter:
+        if self.echo_filter and _tool_depth == 0:  # Only register on first call
             self.echo_filter.on_tts_start(session_id, character_config.name)
         
         try:
@@ -3048,6 +3126,9 @@ class UnifiedVoiceConversation:
             # Generate stop sequences for multi-character conversations
             stop_sequences = []
             if is_prefill_format:
+                # EOT token - highest priority (prevents participant simulation)
+                stop_sequences.append(get_eot_token())
+
                 # Add all character names as stop sequences
                 for char_name in self.character_manager.characters.keys():
                     stop_sequences.append(f"\n\n{char_name}:")
@@ -3055,7 +3136,7 @@ class UnifiedVoiceConversation:
                     char_config = self.character_manager.get_character_config(char_name)
                     if char_config and char_config.prefill_name and char_config.prefill_name != char_name:
                         stop_sequences.append(f"\n\n{char_config.prefill_name}:")
-                
+
                 # Add human names
                 if hasattr(self.config.conversation, 'prefill_participants'):
                     human_name = self.config.conversation.prefill_participants[0]
@@ -3078,7 +3159,10 @@ class UnifiedVoiceConversation:
                 
                 # Add interrupted marker
                 stop_sequences.append("[Interrupted by user]")
-                
+
+                # Add tool stop sequences if this character has tools enabled
+                stop_sequences.extend(self._get_tool_stop_sequences_for_character(character_config))
+
                 # Remove duplicates while preserving order
                 stop_sequences = list(dict.fromkeys(stop_sequences))
                 print(f"🛑 Character using stop sequences: {stop_sequences}")
@@ -3092,14 +3176,29 @@ class UnifiedVoiceConversation:
                 temperature=character_config.temperature,
                 stop_sequences=stop_sequences if stop_sequences else None
             )
-            
+
             # Track if we need to skip the prefill prefix
             skip_prefix = is_prefill_format
             prefix_buffer = "" if skip_prefix else None
+
+            # Track accumulated text and stop reason for tool detection
+            accumulated_text = ""
+            stop_reason = None
+            tool_stop_seq = get_tool_stop_sequence()
+
+            # Track if we're inside a tool block (don't voice tool XML)
+            in_tool_block = False
+            tool_block_buffer = ""  # Buffer for UI display of tool blocks
+
             async for chunk in response:
-                if chunk.type == "content_block_delta" and chunk.delta.text:
+                # Track stop reason from message_delta events
+                if chunk.type == "message_delta":
+                    if hasattr(chunk, 'delta') and hasattr(chunk.delta, 'stop_reason'):
+                        stop_reason = chunk.delta.stop_reason
+                elif chunk.type == "content_block_delta" and chunk.delta.text:
                     text = chunk.delta.text
-                    
+                    accumulated_text += text  # Track full response for tool parsing
+
                     # Skip the character name prefix in prefill mode
                     if skip_prefix and prefix_buffer is not None:
                         prefix_buffer += text
@@ -3150,10 +3249,13 @@ class UnifiedVoiceConversation:
                             prefix_buffer = None  # Stop checking
                         # else: buffer is a partial match, keep accumulating
                     else:
-                        # Track for echo filter
-                        if self.echo_filter:
-                            self.echo_filter.on_tts_chunk(session_id, text)
-                        yield text
+                        # Check if we're entering/inside a tool block
+                        # Update tool block state based on accumulated text
+                        if '<function_calls>' in accumulated_text:
+                            open_count = accumulated_text.count('<function_calls>')
+                            close_count = accumulated_text.count('</function_calls>')
+                            in_tool_block = open_count > close_count
+
                         # Broadcast to UI
                         if hasattr(self, 'ui_server'):
                             await self.ui_server.broadcast_ai_stream(
@@ -3161,13 +3263,137 @@ class UnifiedVoiceConversation:
                                 text=text,
                                 session_id=ui_session_id
                             )
-                    
+
+                        # Echo filter only for non-tool content
+                        if self.echo_filter and not in_tool_block:
+                            self.echo_filter.on_tts_chunk(session_id, text)
+
+                        # Always yield for history - TTS will filter function_calls content
+                        yield text
+
+            # After streaming completes, check for tool calls (only if character has tools enabled)
+
+            if self._character_has_tools(character_config):
+                # Anthropic stops BEFORE outputting the stop sequence, so we need to append it
+                # Check if we stopped on </invoke> (model's natural stop point)
+                if '<function_calls>' in accumulated_text and '<invoke' in accumulated_text:
+                    closing_tags_to_send = ""
+                    # Check if we have an unclosed invoke tag
+                    if accumulated_text.count('<invoke') > accumulated_text.count('</invoke>'):
+                        accumulated_text += '</invoke>'
+                        closing_tags_to_send += '</invoke>'
+                        print(f"🔧 Detected unclosed invoke block, appended </invoke>")
+                    # Check if we have an unclosed function_calls tag
+                    if accumulated_text.count('<function_calls>') > accumulated_text.count('</function_calls>'):
+                        accumulated_text += '\n</function_calls>'
+                        closing_tags_to_send += '\n</function_calls>'
+                        print(f"🔧 Detected unclosed function_calls block, appended </function_calls>")
+                    # Send closing tags to UI for display AND yield to TTS
+                    # TTS needs the complete function_calls block to filter properly
+                    if closing_tags_to_send:
+                        if hasattr(self, 'ui_server'):
+                            await self.ui_server.broadcast_ai_stream(
+                                speaker=character_config.name,
+                                text=closing_tags_to_send,
+                                session_id=ui_session_id
+                            )
+                        # Yield closing tags so TTS can properly filter the complete block
+                        yield closing_tags_to_send
+
+            # Check for tool calls in the accumulated text (only if character has tools enabled)
+            parsed_tools = parse_tool_calls(accumulated_text) if self._character_has_tools(character_config) else None
+
+            if parsed_tools and parsed_tools.calls and _tool_depth < MAX_TOOL_DEPTH:
+                print(f"🔧 Detected {len(parsed_tools.calls)} tool call(s), executing...")
+
+                # Execute each tool and collect results
+                tool_results = []
+                # Build context for tool execution
+                tool_context = {
+                    'osc_client': self.osc_client if hasattr(self, 'osc_client') else None,
+                    'character_name': character_config.name,
+                }
+
+                for tool_call in parsed_tools.calls:
+                    print(f"  🔧 Executing tool: {tool_call.name}")
+                    try:
+                        # Execute via character tool handler (supports both per-character and global tools)
+                        result = await self._execute_character_tool(
+                            tool_call.name,
+                            tool_call.input,
+                            character_config,
+                            tool_context
+                        )
+                        tool_results.append(ParsedToolResult(
+                            tool_use_id=tool_call.id,
+                            content=str(result),
+                            is_error=False
+                        ))
+                        print(f"  ✅ Tool {tool_call.name} completed")
+                    except Exception as tool_error:
+                        print(f"  ❌ Tool {tool_call.name} failed: {tool_error}")
+                        import traceback
+                        traceback.print_exc()
+                        tool_results.append(ParsedToolResult(
+                            tool_use_id=tool_call.id,
+                            content=f"Error: {str(tool_error)}",
+                            is_error=True
+                        ))
+
+                # Format results for injection
+                results_xml = format_tool_results(tool_results)
+
+                # Build continuation messages with tool results injected via prefill
+                # The accumulated text already includes the closing tag from above
+                continuation_messages = list(messages)  # Copy original messages
+
+                # Determine the prefill name for continuation
+                continuation_prefill = prefill_name or character_config.prefill_name or character_config.name
+
+                # Find the last assistant message and append the tool call + results
+                if continuation_messages and continuation_messages[-1].get("role") == "assistant":
+                    # Append to existing assistant message
+                    last_content = continuation_messages[-1].get("content", "")
+                    continuation_messages[-1] = {
+                        "role": "assistant",
+                        "content": last_content + accumulated_text + "\n" + results_xml + "\n" + continuation_prefill + ":"
+                    }
+                else:
+                    # Add new assistant message with tool call + results + prefill
+                    continuation_messages.append({
+                        "role": "assistant",
+                        "content": accumulated_text + "\n" + results_xml + "\n" + continuation_prefill + ":"
+                    })
+
+                # Log the continuation request
+                continuation_timestamp = time.time()
+                continuation_request_filename = self._log_llm_request(
+                    continuation_messages,
+                    character_config.llm_model,
+                    continuation_timestamp,
+                    character_config.llm_provider,
+                    stop_sequences  # Use same stop sequences
+                )
+                print(f"📝 Logged tool continuation request: {continuation_request_filename}")
+
+                # Recursively continue streaming with tool results
+                async for continuation_text in self._stream_character_anthropic_response(
+                    continuation_messages,
+                    character_config,
+                    continuation_timestamp,  # Use new timestamp for continuation
+                    ui_session_id,
+                    pending_message_id,
+                    _tool_depth=_tool_depth + 1
+                ):
+                    yield continuation_text
+
         except Exception as e:
             print(f"❌ Anthropic streaming error for {character_config.name}: {e}")
             raise
         finally:
             # Send completion signal to UI with the pre-calculated message_id
-            if hasattr(self, 'ui_server'):
+            # Only send on the outermost call (not during tool recursion)
+            if _tool_depth == 0 and hasattr(self, 'ui_server'):
                 await self.ui_server.broadcast_ai_stream(
                     speaker=character_config.name,
                     text="",
@@ -3224,6 +3450,9 @@ class UnifiedVoiceConversation:
             # Generate stop sequences for multi-character conversations
             stop_sequences = []
             if is_prefill_format:
+                # EOT token - highest priority (prevents participant simulation)
+                stop_sequences.append(get_eot_token())
+
                 # Add all character names as stop sequences
                 for char_name in self.character_manager.characters.keys():
                     stop_sequences.append(f"\n\n{char_name}:")
@@ -3231,7 +3460,7 @@ class UnifiedVoiceConversation:
                     char_config = self.character_manager.get_character_config(char_name)
                     if char_config and char_config.prefill_name and char_config.prefill_name != char_name:
                         stop_sequences.append(f"\n\n{char_config.prefill_name}:")
-                
+
                 # Add human names
                 if hasattr(self.config.conversation, 'prefill_participants'):
                     human_name = self.config.conversation.prefill_participants[0]
@@ -3561,10 +3790,265 @@ class UnifiedVoiceConversation:
                 {"role": "user", "content": self.config.conversation.prefill_user_message},
                 {"role": "assistant", "content": assistant_content}
             ]
-    
-    def _format_turn_for_prefill(self, role: str, content: Any, character: Optional[str], 
-                                 current_character: str, prefill_name: str, speaker_name: Optional[str] = None) -> Optional[str]:
-        """Format a single turn for prefill conversation."""
+
+    def _get_tool_definitions_for_character(self, character_config) -> List[ToolDefinition]:
+        """Get tool definitions for a character.
+
+        Supports three formats:
+        1. tools: true - Use all globally registered tools
+        2. tools: ["tool1", "tool2"] - Use specific global tools
+        3. tools: {name: {type: osc, ...}} - Per-character tool definitions
+        """
+        char_tools = getattr(character_config, 'tools', None)
+        print(f"🔧 DEBUG: _get_tool_definitions_for_character({character_config.name}): tools = {type(char_tools).__name__}: {repr(char_tools)[:100] if char_tools else 'None'}")
+        if not char_tools:
+            return []
+
+        # Format 1 & 2: Reference global tools
+        if char_tools is True or isinstance(char_tools, list):
+            if not hasattr(self, 'tool_registry') or not hasattr(self.tool_registry, 'get_tool_definitions'):
+                return []
+            all_definitions = self.tool_registry.get_tool_definitions()
+            if char_tools is True:
+                return all_definitions
+            return [d for d in all_definitions if d.name in char_tools]
+
+        # Format 3: Per-character tool definitions (dict)
+        if isinstance(char_tools, dict):
+            definitions = []
+            for tool_name, tool_config in char_tools.items():
+                if not isinstance(tool_config, dict):
+                    continue
+
+                # Get tool type (default to 'osc')
+                tool_type = tool_config.get('type', 'osc')
+
+                # Build description
+                description = tool_config.get('description', f'{tool_name} tool')
+
+                # Build parameters based on tool type
+                if tool_type == 'osc':
+                    param_name = tool_config.get('param_name', 'value')
+                    param_desc = tool_config.get('param_description', 'The value to send')
+                    parameters = {
+                        param_name: {
+                            'type': 'string',
+                            'description': param_desc,
+                            'required': True
+                        }
+                    }
+                else:
+                    parameters = {'value': {'type': 'string', 'required': True}}
+
+                definitions.append(ToolDefinition(
+                    name=tool_name,
+                    description=description,
+                    parameters=parameters
+                ))
+            return definitions
+
+        return []
+
+    def _inject_tools_into_system_prompt_for_character(self, system_prompt: str, character_config) -> str:
+        """Inject tool definitions into a system prompt for a specific character."""
+        tool_definitions = self._get_tool_definitions_for_character(character_config)
+        if not tool_definitions:
+            return system_prompt
+
+        return inject_tools_into_system(system_prompt, tool_definitions)
+
+    def _get_tool_stop_sequences_for_character(self, character_config) -> List[str]:
+        """Get stop sequences needed for tool detection for a specific character."""
+        tool_definitions = self._get_tool_definitions_for_character(character_config)
+        if tool_definitions:
+            # Include both </invoke> (model's natural stop point) and </function_calls>
+            return ['</invoke>', get_tool_stop_sequence()]
+        return []
+
+    def _character_has_tools(self, character_config) -> bool:
+        """Check if a character has tools enabled."""
+        char_tools = getattr(character_config, 'tools', None)
+        if not char_tools:
+            return False
+        # Dict format (per-character tools) doesn't need global registry
+        if isinstance(char_tools, dict):
+            return len(char_tools) > 0
+        # True or list format needs global registry
+        if not hasattr(self, 'tool_registry') or not self.tool_registry.tools:
+            return False
+        return True
+
+    def _get_character_tool_names(self, character_config) -> set:
+        """Get the set of tool names available to a character."""
+        tool_names = set()
+        char_tools = getattr(character_config, 'tools', None)
+        if isinstance(char_tools, dict):
+            tool_names.update(char_tools.keys())
+        elif char_tools and hasattr(self, 'tool_registry') and self.tool_registry.tools:
+            # Global tools
+            tool_names.update(self.tool_registry.tools.keys())
+        return tool_names
+
+    def _strip_tool_calls_from_content(self, content: str, allowed_tools: set = None) -> str:
+        """Remove tool calls from content, keeping only calls to allowed tools.
+
+        Args:
+            content: The text content to filter
+            allowed_tools: Set of tool names the character has access to.
+                          If None or empty, removes ALL tool calls.
+        """
+        if not content or not isinstance(content, str):
+            return content
+
+        if not allowed_tools:
+            allowed_tools = set()
+
+        result = content
+
+        # Find and selectively remove function_calls blocks
+        # Pattern matches complete blocks: <function_calls>...<invoke name="tool_name">...</invoke>...</function_calls>
+        def replace_if_not_allowed(match):
+            block = match.group(0)
+            # Extract tool name from the invoke tag
+            tool_match = re.search(r'<invoke\s+name="([^"]+)"', block)
+            if tool_match:
+                tool_name = tool_match.group(1)
+                if tool_name in allowed_tools:
+                    return block  # Keep it
+            return ''  # Remove it
+
+        # Remove complete function_calls blocks for tools not in allowed_tools
+        result = re.sub(r'<function_calls>[\s\S]*?</function_calls>', replace_if_not_allowed, result)
+
+        # Remove partial/unclosed function_calls blocks (check if tool is allowed)
+        partial_match = re.search(r'<function_calls>([\s\S]*)$', result)
+        if partial_match:
+            partial_block = partial_match.group(0)
+            tool_match = re.search(r'<invoke\s+name="([^"]+)"', partial_block)
+            if tool_match:
+                tool_name = tool_match.group(1)
+                if tool_name not in allowed_tools:
+                    result = re.sub(r'<function_calls>[\s\S]*$', '', result)
+            else:
+                # No tool name found, remove it
+                result = re.sub(r'<function_calls>[\s\S]*$', '', result)
+
+        # Remove function_results blocks (these correspond to tool calls, filter same way)
+        def replace_results_if_not_allowed(match):
+            block = match.group(0)
+            # Results don't have tool names directly, but we can check the preceding context
+            # For simplicity, remove all results if the character has no tools
+            # Or keep all if they have any tools (they might need to see results)
+            if allowed_tools:
+                return block  # Character has tools, keep results
+            return ''  # No tools, remove results
+
+        result = re.sub(r'<function_results>[\s\S]*?</function_results>', replace_results_if_not_allowed, result)
+
+        # Clean up extra whitespace
+        result = re.sub(r'\n{3,}', '\n\n', result)
+        return result.strip()
+
+    async def _execute_character_tool(self, tool_name: str, tool_input: Dict, character_config, context: Dict) -> str:
+        """Execute a tool for a character, handling both global and per-character tools."""
+        char_tools = getattr(character_config, 'tools', None)
+
+        # Check if this is a per-character tool (dict format)
+        if isinstance(char_tools, dict) and tool_name in char_tools:
+            tool_config = char_tools[tool_name]
+            tool_type = tool_config.get('type', 'osc')
+
+            if tool_type == 'osc':
+                from tools import OSCTool
+                tool = OSCTool(tool_config)
+
+                # Get the parameter value (could be named differently)
+                param_name = tool_config.get('param_name', 'value')
+                content = tool_input.get(param_name, tool_input.get('value', ''))
+                if isinstance(content, dict):
+                    import json
+                    content = json.dumps(content)
+
+                result = await tool.execute(str(content), context)
+                return result.content or "Done"
+
+            return f"Unknown tool type: {tool_type}"
+
+        # Fall back to global registry
+        if hasattr(self, 'tool_registry'):
+            return await self.tool_registry.execute_tool(tool_name, tool_input, context)
+
+        return f"Tool not found: {tool_name}"
+
+    def _get_tool_instructions_for_character(self, character_config) -> Optional[str]:
+        """Get tool instructions string for a specific character (for system message injection)."""
+        tool_definitions = self._get_tool_definitions_for_character(character_config)
+        if not tool_definitions:
+            return None
+
+        from tool_parser import format_tool_definitions, get_tool_instructions
+        return f"""<available_tools>
+{format_tool_definitions(tool_definitions)}
+</available_tools>
+
+{get_tool_instructions(tool_definitions)}"""
+
+    def _maybe_inject_system_message(self, character_config):
+        """Check if system message needs to be injected and do so if needed."""
+        if not hasattr(self, 'context_manager') or not self.context_manager:
+            return
+
+        active_context = self.context_manager.get_active_context()
+        if not active_context:
+            return
+
+        if not active_context.needs_system_message:
+            return
+
+        # Get tool instructions for this character
+        tool_instructions = self._get_tool_instructions_for_character(character_config)
+
+        # Build the message content
+        message_parts = []
+        if active_context.config.system_active_message:
+            message_parts.append(active_context.config.system_active_message)
+        if tool_instructions:
+            message_parts.append(tool_instructions)
+
+        if not message_parts:
+            active_context.needs_system_message = False
+            return
+
+        # Create the system turn
+        from context_manager import ConversationTurn
+        from datetime import datetime
+        system_turn = ConversationTurn(
+            role="user",
+            content="System: " + "\n\n".join(message_parts),
+            timestamp=datetime.now(),
+            status="completed",
+            character=None,
+            speaker_name="System"
+        )
+
+        # Inject into BOTH state.conversation_history AND context.current_history
+        self.state.conversation_history.append(system_turn)
+        active_context.current_history.append(system_turn)
+        active_context.is_modified = True
+        active_context.needs_system_message = False
+        print(f"📢 Injected system message into context '{active_context.config.name}' and state history")
+
+    def _format_turn_for_prefill(self, role: str, content: Any, character: Optional[str],
+                                 current_character: str, prefill_name: str, speaker_name: Optional[str] = None,
+                                 include_eot: bool = True) -> Optional[str]:
+        """Format a single turn for prefill conversation.
+
+        Args:
+            include_eot: If True, append EOT token at end to mark turn boundary.
+                        Set to False for the current turn being generated.
+        """
+        eot = get_eot_token() if include_eot else ""
+
         # Extract text from content
         if isinstance(content, list):
             text_parts = []
@@ -3572,33 +4056,33 @@ class UnifiedVoiceConversation:
                 if isinstance(item, dict) and item.get("type") == "text":
                     text_parts.append(item.get("text", ""))
             content = " ".join(text_parts)
-        
+
         if not content or not isinstance(content, str):
             return None
-        
+
         if role == "user":
             # Human messages - use speaker name if available, otherwise fallback to "H"
             participant = speaker_name if speaker_name else "H"
-            return f"{participant}: {content}"
+            return f"{participant}: {content}{eot}"
         elif role == "assistant":
             # Character messages
             if character == current_character:
                 # This character's own messages
-                return f"{prefill_name}: {content}"
+                return f"{prefill_name}: {content}{eot}"
             elif character:
                 # Other character's messages - get their prefill name
                 other_config = self.character_manager.get_character_config(character)
                 if other_config and other_config.prefill_name:
-                    return f"{other_config.prefill_name}: {content}"
+                    return f"{other_config.prefill_name}: {content}{eot}"
                 else:
-                    return f"{character}: {content}"
+                    return f"{character}: {content}{eot}"
             else:
                 # Generic assistant
-                return f"Assistant: {content}"
+                return f"Assistant: {content}{eot}"
         elif role == "system":
             # System messages (like interruptions)
-            return f"System: {content}"
-        
+            return f"System: {content}{eot}"
+
         return None
     
     def _convert_character_messages_to_prefill(self, messages: List[Dict[str, str]], character_prefill_name: str) -> List[Dict[str, str]]:

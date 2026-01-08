@@ -317,9 +317,20 @@ class AsyncTTSStreamer:
                 # add spaces back between the sentences
                 self.generated_text = (self.generated_text + " " + sentence).strip()
 
+                # Filter out <function_calls>...</function_calls> content for TTS
+                # Keep it in generated_text (history) but don't speak it
+                speakable = re.sub(r'<function_calls>[\s\S]*?</function_calls>', '', sentence)
+                # Also filter partial/unclosed function_calls blocks
+                speakable = re.sub(r'<function_calls>[\s\S]*$', '', speakable)
+                speakable = speakable.strip()
+
+                # Skip if nothing left to speak
+                if not speakable:
+                    continue
+
                 # split out *emotive* into seperate parts
                 eleven_messages = []
-                for text_part, is_emotive in self.extract_emotive_text(sentence):
+                for text_part, is_emotive in self.extract_emotive_text(speakable):
 
                     if text_part.strip():
                         voice_id = self.config.emotive_voice_id if is_emotive else self.config.voice_id
@@ -365,10 +376,18 @@ class AsyncTTSStreamer:
             while audio_stream.get_buffered_duration() > 0:
                 await asyncio.sleep(0.05)
 
+            # If no audio was ever generated (e.g., all content was filtered),
+            # still call the callback to stop the thinking sound
+            if first_audio_callback is not None:
+                await first_audio_callback()
+                first_audio_callback = None
+
             # Save accumulated audio to archive (only if completed successfully)
             if self._archive_audio_buffer and self._current_message_id:
                 full_audio = np.concatenate(self._archive_audio_buffer)
                 self._save_audio_archive(full_audio, self._current_message_id)
+
+            return True  # Completed successfully
 
         except asyncio.CancelledError:
             print(f"Cancelled tts, interrupting playback")
@@ -392,6 +411,7 @@ class AsyncTTSStreamer:
         except Exception as e:
             print(f"TTS error")
             print(traceback.print_exc())
+            return False  # Failed due to error
         finally:
             if osc_emit_task:
                 try:
@@ -446,9 +466,10 @@ class AsyncTTSStreamer:
         self.speak_task = asyncio.create_task(self._speak_text_helper(text_generator, first_audio_callback, osc_client, osc_client_address))
 
         # wait for it to finish
-        await self.speak_task
+        result = await self.speak_task
 
         self.speak_task = None
+        return result
     
     def is_currently_playing(self):
         return self.speak_task is not None

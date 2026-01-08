@@ -560,6 +560,7 @@
                 <select id="context-selector" onchange="switchContext(this.value)">
                 </select>
                 <button class="sidebar-btn" onclick="resetContext()">🔄 Reset Context</button>
+                <button class="sidebar-btn" onclick="duplicateContext()">📋 Save as New Context</button>
             </div>
             
             <div class="sidebar-section">
@@ -760,6 +761,12 @@
                     break;
                 case 'context_switched':
                     updateActiveContext(msg.data);
+                    break;
+                case 'context_duplicated':
+                    alert(`Created new context: ${msg.data.new_context}`);
+                    break;
+                case 'context_deleted':
+                    console.log(`Deleted context: ${msg.data.context_name}`);
                     break;
                 case 'learned_speakers':
                     learnedSpeakers = msg.data.speakers || [];
@@ -1180,7 +1187,19 @@
                 }
             }
         }
-        
+
+        function duplicateContext() {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                const customName = prompt('Enter name for new context (leave empty for auto-generated):');
+                if (customName !== null) {  // null means user clicked Cancel
+                    ws.send(JSON.stringify({
+                        type: 'duplicate_context',
+                        data: { new_name: customName || null }
+                    }));
+                }
+            }
+        }
+
         // CONTROLS
         function toggleSTT() {
             if (ws && ws.readyState === WebSocket.OPEN) {
