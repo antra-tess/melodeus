@@ -20,6 +20,8 @@ import queue
 from typing import Optional, AsyncGenerator, Dict, Any, List, Tuple, Any
 from dataclasses import dataclass, field
 import numpy as np
+import scipy.io.wavfile as wavfile
+import os
 
 try:
     from mel_aec_audio import (
@@ -98,6 +100,8 @@ class TTSConfig:
     emotive_similarity_boost: float = 0.8
     # Audio output device
     output_device_name: Optional[str] = None  # None = default device, or specify device name
+    # Audio archiving
+    audio_archive_dir: Optional[str] = None  # Directory to save audio files for replay
 
 @dataclass
 class AlignmentData:
@@ -162,7 +166,29 @@ class AsyncTTSStreamer:
         self.config = config
         self.speak_task = None
         self.generated_text = ""
-    
+        self._archive_audio_buffer = []  # Accumulates audio for archiving
+        self._current_message_id = None
+
+    def _save_audio_archive(self, audio_data: np.ndarray, message_id: str):
+        """Save audio to archive directory as WAV file."""
+        if not self.config.audio_archive_dir or not message_id:
+            return
+
+        try:
+            # Create ai subdirectory
+            ai_dir = os.path.join(self.config.audio_archive_dir, "ai")
+            os.makedirs(ai_dir, exist_ok=True)
+
+            # Save as WAV file at 48kHz (playback sample rate)
+            filepath = os.path.join(ai_dir, f"{message_id}.wav")
+
+            # Convert float32 [-1, 1] to int16
+            audio_int16 = (audio_data * 32767).astype(np.int16)
+            wavfile.write(filepath, shared_sample_rate(), audio_int16)
+            print(f"Saved AI audio to {filepath}")
+        except Exception as e:
+            print(f"Error saving audio archive: {e}")
+
     def _get_voice_settings(self, is_emotive: bool) -> Dict[str, float]:
         """Get voice settings for regular or emotive speech."""
         if is_emotive:
@@ -223,6 +249,7 @@ class AsyncTTSStreamer:
         websocket = None
         self.alignments = []
         self.generated_text = ""
+        self._archive_audio_buffer = []  # Reset audio buffer for archiving
         osc_emit_task = None
         start_time_played = None
         try:
@@ -265,6 +292,9 @@ class AsyncTTSStreamer:
                     # now send the audio, all in one piece
                     concat_data = np.concatenate(audio_datas)
 
+                    # Accumulate for archiving
+                    self._archive_audio_buffer.append(concat_data)
+
                     # see when it'll actually be played
                     current_time = time.time()
                     buffered_duration = audio_stream.get_buffered_duration()
@@ -287,9 +317,20 @@ class AsyncTTSStreamer:
                 # add spaces back between the sentences
                 self.generated_text = (self.generated_text + " " + sentence).strip()
 
+                # Filter out <function_calls>...</function_calls> content for TTS
+                # Keep it in generated_text (history) but don't speak it
+                speakable = re.sub(r'<function_calls>[\s\S]*?</function_calls>', '', sentence)
+                # Also filter partial/unclosed function_calls blocks
+                speakable = re.sub(r'<function_calls>[\s\S]*$', '', speakable)
+                speakable = speakable.strip()
+
+                # Skip if nothing left to speak
+                if not speakable:
+                    continue
+
                 # split out *emotive* into seperate parts
                 eleven_messages = []
-                for text_part, is_emotive in self.extract_emotive_text(sentence):
+                for text_part, is_emotive in self.extract_emotive_text(speakable):
 
                     if text_part.strip():
                         voice_id = self.config.emotive_voice_id if is_emotive else self.config.voice_id
@@ -334,7 +375,20 @@ class AsyncTTSStreamer:
             # wait for buffered audio to drain (polling)
             while audio_stream.get_buffered_duration() > 0:
                 await asyncio.sleep(0.05)
-                
+
+            # If no audio was ever generated (e.g., all content was filtered),
+            # still call the callback to stop the thinking sound
+            if first_audio_callback is not None:
+                await first_audio_callback()
+                first_audio_callback = None
+
+            # Save accumulated audio to archive (only if completed successfully)
+            if self._archive_audio_buffer and self._current_message_id:
+                full_audio = np.concatenate(self._archive_audio_buffer)
+                self._save_audio_archive(full_audio, self._current_message_id)
+
+            return True  # Completed successfully
+
         except asyncio.CancelledError:
             print(f"Cancelled tts, interrupting playback")
             # not enough audio played and interrupted, make empty
@@ -357,6 +411,7 @@ class AsyncTTSStreamer:
         except Exception as e:
             print(f"TTS error")
             print(traceback.print_exc())
+            return False  # Failed due to error
         finally:
             if osc_emit_task:
                 try:
@@ -400,17 +455,21 @@ class AsyncTTSStreamer:
         #print(self.generated_text)
         return trimmed_end(self.generated_text, played_text)
 
-    async def speak_text(self, text_generator: AsyncGenerator[str, None], first_audio_callback, osc_client, osc_client_address):
+    async def speak_text(self, text_generator: AsyncGenerator[str, None], first_audio_callback, osc_client, osc_client_address, message_id: Optional[str] = None):
         # interrupt (if already running)
         await self.interrupt()
+
+        # Store message_id for audio archiving
+        self._current_message_id = message_id
 
         # start the task (this way it's cancellable and we don't need to spam checks)
         self.speak_task = asyncio.create_task(self._speak_text_helper(text_generator, first_audio_callback, osc_client, osc_client_address))
 
         # wait for it to finish
-        await self.speak_task
+        result = await self.speak_task
 
         self.speak_task = None
+        return result
     
     def is_currently_playing(self):
         return self.speak_task is not None

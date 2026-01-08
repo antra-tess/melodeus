@@ -4,6 +4,9 @@ import websockets
 import json
 import time
 import uuid
+import os
+import sys
+import subprocess
 from datetime import datetime
 from typing import Set, Dict, Any, Optional
 from dataclasses import dataclass, asdict
@@ -34,24 +37,29 @@ class VoiceUIServer:
         interruptions_enabled = False
         director_enabled = False
         director_mode = "off"
+        stt_start_enabled = False
+        mute_while_speaking = True
         if conversation and hasattr(conversation, 'config'):
             interruptions_enabled = conversation.config.conversation.interruptions_enabled
             director_enabled = conversation.config.conversation.director_enabled
-            director_mode = getattr(conversation.config.conversation, 'director_mode', 
+            director_mode = getattr(conversation.config.conversation, 'director_mode',
                 "director" if director_enabled else "off")
-            
+            stt_start_enabled = getattr(conversation.config.conversation, 'stt_start_enabled', False)
+            mute_while_speaking = getattr(conversation.config.conversation, 'mute_while_speaking', True)
+
         self.current_state = {
             "current_speaker": None,
             "is_speaking": False,
             "is_processing": False,
             "pending_speaker": None,
             "thinking_sound": False,
-            "stt_active": True,
+            "stt_active": stt_start_enabled,  # Reflects actual STT state
             "conversation_active": False,
             "interruptions_enabled": interruptions_enabled,
             "director_enabled": director_enabled,
             "director_mode": director_mode,  # "off", "same_model", "director"
-            "last_ai_speaker": None  # For same_model mode - which AI will respond next
+            "last_ai_speaker": None,  # For same_model mode - which AI will respond next
+            "mute_while_speaking": mute_while_speaking  # Mute input while AI is speaking
         }
         
     async def start(self):
@@ -179,6 +187,11 @@ class VoiceUIServer:
                 target_name = data.get("target_name")
                 await self.handle_merge_speakers(speaker_ids, target_name)
 
+            elif msg_type == "delete_speaker":
+                # Delete a single speaker from fingerprint database
+                speaker_id = data.get("speaker_id")
+                await self.handle_delete_speaker(speaker_id)
+
             elif msg_type == "send_text_message":
                 # Handle text message from UI
                 speaker_name = data.get("speaker_name", "USER")
@@ -219,7 +232,27 @@ class VoiceUIServer:
             elif msg_type == "reset_context":
                 # Reset current context to original history
                 await self.handle_reset_context()
-                
+
+            elif msg_type == "duplicate_context":
+                # Duplicate current context as a new context
+                new_name = data.get("new_name")  # Optional custom name
+                await self.handle_duplicate_context(new_name)
+
+            elif msg_type == "delete_context":
+                # Delete a dynamic context
+                context_name = data.get("context_name")
+                if context_name:
+                    await self.handle_delete_context(context_name)
+
+            elif msg_type == "restart":
+                # Restart the melodeus server
+                await self.handle_restart()
+
+            elif msg_type == "set_mute_while_speaking":
+                # Toggle mute while AI is speaking
+                enabled = data.get("enabled", True)
+                await self.handle_set_mute_while_speaking(enabled)
+
             else:
                 await self.send_error(websocket, f"Unknown message type: {msg_type}")
                 
@@ -315,16 +348,18 @@ class VoiceUIServer:
         """Handle STT pause/resume."""
         if not self.conversation or not hasattr(self.conversation, 'stt'):
             return
-            
+
         if action == "pause":
             await self.conversation.stt.pause()
             self.current_state["stt_active"] = False
+            self.conversation.state.stt_enabled = False
             print("⏸️ STT paused by UI")
         elif action == "resume":
             await self.conversation.stt.resume()
             self.current_state["stt_active"] = True
+            self.conversation.state.stt_enabled = True
             print("▶️ STT resumed by UI")
-            
+
         await self.broadcast_system_status()
         
     async def handle_select_speaker(self, speaker: str):
@@ -339,6 +374,12 @@ class VoiceUIServer:
     async def handle_trigger_speaker(self, speaker: str):
         """Handle triggering a specific speaker to respond."""
         if not self.conversation:
+            return
+
+        # Validate that the speaker exists
+        if not self.conversation.character_manager.get_character_config(speaker):
+            print(f"❌ Cannot trigger unknown character: {speaker}")
+            await self.broadcast_error(f"Unknown character: {speaker}")
             return
 
         await self.conversation._get_llm_output(speaker)
@@ -620,9 +661,9 @@ class VoiceUIServer:
             data=self.current_state
         ))
         
-    async def broadcast_transcription(self, speaker: str, text: str, 
+    async def broadcast_transcription(self, speaker: str, text: str,
                                     is_final: bool = False, is_interim: bool = False, is_edit: bool = False,
-                                    message_id = None):
+                                    message_id = None, has_audio: bool = None):
         """Broadcast transcription update."""
         message_data = {
             "speaker": speaker,
@@ -631,10 +672,14 @@ class VoiceUIServer:
             "is_interim": is_interim,
             "timestamp": time.time()
         }
-        
+
         # Add message ID for final messages so they can be edited/deleted
         if is_final and not is_interim:
             message_data["message_id"] = str(uuid.uuid4()) if not message_id else message_id
+            # Check if audio archiving is enabled (has_audio flag for replay button)
+            if has_audio is None and self.conversation:
+                has_audio = getattr(self.conversation.config.conversation, 'audio_archive_enabled', False)
+            message_data["has_audio"] = has_audio if has_audio else False
         
         if is_edit:
             # Broadcast the edit to all clients
@@ -652,7 +697,7 @@ class VoiceUIServer:
         
     async def broadcast_ai_stream(self, speaker: str, text: str,
                                  is_complete: bool = False, session_id: str = "",
-                                 message_id: str = None):
+                                 message_id: str = None, has_audio: bool = None):
         """Broadcast AI response stream."""
         message_data = {
             "speaker": speaker,
@@ -666,6 +711,10 @@ class VoiceUIServer:
         # Use provided message_id if available, otherwise generate UUID (fallback)
         if is_complete:
             message_data["message_id"] = message_id if message_id else str(uuid.uuid4())
+            # Check if audio archiving is enabled (has_audio flag for replay button)
+            if has_audio is None and self.conversation:
+                has_audio = getattr(self.conversation.config.conversation, 'audio_archive_enabled', False)
+            message_data["has_audio"] = has_audio if has_audio else False
 
         await self.broadcast(UIMessage(
             type="ai_stream",
@@ -1016,6 +1065,35 @@ class VoiceUIServer:
             self.logger.error(f"Error merging speakers: {e}")
             await self.send_error(None, str(e))
 
+    async def handle_delete_speaker(self, speaker_id: str):
+        """Delete a single speaker from the fingerprint database."""
+        if not self.conversation or not speaker_id:
+            await self.send_error(None, "No speaker ID provided")
+            return
+
+        try:
+            if hasattr(self.conversation, 'stt') and hasattr(self.conversation.stt, 'voice_fingerprinter'):
+                fingerprinter = self.conversation.stt.voice_fingerprinter
+                if fingerprinter:
+                    success = fingerprinter.delete_speaker(speaker_id)
+                    if success:
+                        # Get updated list of speakers
+                        speakers = fingerprinter.get_known_speakers()
+                        await self.broadcast(UIMessage("speaker_deleted", {
+                            "speaker_id": speaker_id,
+                            "known_speakers": speakers
+                        }))
+                        print(f"🗑️ Deleted speaker: {speaker_id}")
+                    else:
+                        await self.send_error(None, f"Failed to delete speaker: {speaker_id}")
+                else:
+                    print("⚠️ No voice fingerprinter available")
+            else:
+                print("⚠️ Voice fingerprinting not enabled")
+        except Exception as e:
+            self.logger.error(f"Error deleting speaker: {e}")
+            await self.send_error(None, str(e))
+
     async def handle_text_message(self, speaker_name: str, text: str):
         """Handle text message from UI."""
         if not self.conversation or not text.strip():
@@ -1039,6 +1117,8 @@ class VoiceUIServer:
             raw_data: dict = None
             message_id: str = None  # For edit tracking
             is_edit: bool = False  # Whether this is editing an existing message
+            audio_window_start: int = None  # For audio archiving (not used for text input)
+            audio_window_end: int = None  # For audio archiving (not used for text input)
             
         # Create a result that looks like it came from STT
         result = SyntheticTranscriptionResult(
@@ -1143,11 +1223,105 @@ class VoiceUIServer:
                 await self.send_conversation_history(ws)
             
             print("🔄 Reset context to original history")
-            
+
         except Exception as e:
             self.logger.error(f"Error resetting context: {e}")
             await self.broadcast_error(str(e))
-    
+
+    async def handle_duplicate_context(self, new_name: str = None):
+        """Duplicate current context as a new context."""
+        if not self.conversation or not self.conversation.context_manager:
+            return
+
+        try:
+            # Duplicate the active context
+            result_name = self.conversation.context_manager.duplicate_context(new_name=new_name)
+
+            if result_name:
+                # Broadcast context list update to all clients
+                contexts = self.conversation.context_manager.get_context_list()
+                msg = UIMessage("contexts_list", {"contexts": contexts})
+                await self.broadcast(msg)
+
+                # Notify about the new context
+                msg = UIMessage("context_duplicated", {
+                    "new_context": result_name,
+                    "message": f"Created new context '{result_name}'"
+                })
+                await self.broadcast(msg)
+
+                print(f"✅ Duplicated context as '{result_name}'")
+            else:
+                await self.broadcast_error("Failed to duplicate context")
+
+        except Exception as e:
+            self.logger.error(f"Error duplicating context: {e}")
+            await self.broadcast_error(str(e))
+
+    async def handle_delete_context(self, context_name: str):
+        """Delete a dynamic context."""
+        if not self.conversation or not self.conversation.context_manager:
+            return
+
+        try:
+            success = self.conversation.context_manager.delete_dynamic_context(context_name)
+
+            if success:
+                # Broadcast context list update to all clients
+                contexts = self.conversation.context_manager.get_context_list()
+                msg = UIMessage("contexts_list", {"contexts": contexts})
+                await self.broadcast(msg)
+
+                msg = UIMessage("context_deleted", {
+                    "context_name": context_name,
+                    "message": f"Deleted context '{context_name}'"
+                })
+                await self.broadcast(msg)
+
+                print(f"🗑️ Deleted context '{context_name}'")
+            else:
+                await self.broadcast_error(f"Cannot delete context '{context_name}'")
+
+        except Exception as e:
+            self.logger.error(f"Error deleting context: {e}")
+            await self.broadcast_error(str(e))
+
+    async def handle_restart(self):
+        """Restart the melodeus server by spawning a new process and exiting."""
+        print("🔄 Restart requested from UI...")
+
+        # Notify all clients
+        msg = UIMessage("server_restarting", {"message": "Server is restarting..."})
+        await self.broadcast(msg)
+
+        # Give clients a moment to receive the message
+        await asyncio.sleep(0.5)
+
+        # Get the directory where melodeus lives
+        melodeus_dir = os.path.dirname(os.path.abspath(__file__))
+        start_script = os.path.join(melodeus_dir, "start_melodeus.sh")
+
+        if os.path.exists(start_script):
+            # Spawn a detached process that waits then restarts
+            restart_cmd = f'sleep 2 && cd "{melodeus_dir}" && ./start_melodeus.sh'
+            subprocess.Popen(
+                restart_cmd,
+                shell=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True
+            )
+            print(f"🔄 Spawned restart process, exiting in 1 second...")
+        else:
+            print(f"⚠️ Start script not found: {start_script}")
+            await self.broadcast_error("Restart script not found")
+            return
+
+        # Give the spawn a moment, then exit
+        await asyncio.sleep(1)
+        print("🔄 Exiting for restart...")
+        os._exit(0)
+
     async def handle_toggle_director(self, enabled: bool):
         """Handle toggling director on/off (legacy - prefer set_director_mode)."""
         # Convert to new mode system
@@ -1216,6 +1390,21 @@ class VoiceUIServer:
         await self.broadcast(UIMessage(
             type="state_sync",
             data=self.current_state
+        ))
+
+    async def handle_set_mute_while_speaking(self, enabled: bool):
+        """Toggle mute while AI is speaking setting."""
+        if not self.conversation or not hasattr(self.conversation, 'state'):
+            return
+
+        self.conversation.state.mute_while_speaking = enabled
+        self.current_state["mute_while_speaking"] = enabled
+        print(f"🔇 Mute while speaking: {'enabled' if enabled else 'disabled'}")
+
+        # Broadcast the update to all clients
+        await self.broadcast(UIMessage(
+            type="mute_while_speaking_changed",
+            data={"enabled": enabled}
         ))
 
 

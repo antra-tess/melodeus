@@ -54,6 +54,9 @@ class STTResult:
     speaker_name: Optional[str] = None
     timestamp: datetime = field(default_factory=datetime.now)
     raw_data: Optional[Dict[str, Any]] = None
+    # Audio frame range for extracting user audio
+    audio_window_start: Optional[int] = None
+    audio_window_end: Optional[int] = None
 
 @dataclass
 class STTConfig:
@@ -267,6 +270,8 @@ class AsyncSTTStreamer:
                 speaker_name = user_tag,
                 timestamp = datetime.now(),
                 message_id = message_uuid,
+                audio_window_start = self.prev_audio_window_start,
+                audio_window_end = self.prev_audio_window_end,
             )
             await self._emit_event(
                 STTEventType.UTTERANCE_COMPLETE,

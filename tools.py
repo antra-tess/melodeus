@@ -257,35 +257,58 @@ class CustomTool(Tool):
                 content=f"Custom tool error: {str(e)}"
             )
 
-class LightColorTool(Tool):
-    """Tool for changing light colors via OSC."""
-    
+class OSCTool(Tool):
+    """Tool that sends OSC messages with pre-configured address and prefix args.
+
+    Config options:
+        address: OSC address path (e.g., "/avatar/expression")
+        description: Human-readable description for the model
+        prefix_args: Args to prepend (e.g., avatar name)
+        param_name: Name of the parameter the model provides (default: "value")
+        param_description: Description of the parameter for the model
+    """
+
     async def execute(self, content: str, context: Dict[str, Any] = None) -> ToolResult:
-        """Change light color and send OSC message."""
-        # Parse the color from content
-        color = content.strip()
-        
-        # Get current speaker from context
-        current_speaker = context.get('current_speaker') if context else None
-        send_osc_color_change = context.get('send_osc_color_change') if context else None
-        
-        if not current_speaker:
-            print("⚠️ LightColorTool: No current speaker available")
-            return ToolResult(should_interrupt=False, content=None)
-        
-        if not send_osc_color_change:
-            print("⚠️ LightColorTool: OSC color change function not available")
-            return ToolResult(should_interrupt=False, content=None)
-        
-        # Send OSC message with character name and color
+        """Send an OSC message with the configured address and provided value."""
+        import json
+
+        # Get OSC client from context
+        osc_client = context.get('osc_client') if context else None
+
+        if not osc_client:
+            print("⚠️ OSCTool: No OSC client available")
+            return ToolResult(should_interrupt=False, content="OSC not configured")
+
         try:
-            send_osc_color_change(current_speaker, color)
-            print(f"🎨 LightColorTool: Sent color change for {current_speaker} to {color}")
+            # Get configured address and prefix args
+            address = self.config.get('address', '/default')
+            prefix_args = self.config.get('prefix_args', [])
+
+            # Ensure prefix_args is a list
+            if not isinstance(prefix_args, list):
+                prefix_args = [prefix_args]
+
+            # Parse the value from content (could be JSON or simple string)
+            try:
+                value = json.loads(content)
+            except json.JSONDecodeError:
+                value = content.strip()
+
+            # Build the full args list: prefix_args + value(s)
+            # If value is a list (like RGB), flatten it into args
+            if isinstance(value, list):
+                args = prefix_args + value
+            else:
+                args = prefix_args + [value]
+
+            # Send the OSC message (flatten the list for python-osc)
+            osc_client.send_message(address, args)
+            print(f"📡 OSCTool: Sent {address} {args}")
+            return ToolResult(should_interrupt=False, content=f"Done")
+
         except Exception as e:
-            print(f"❌ LightColorTool: Error sending OSC message: {e}")
-        
-        # Don't interrupt the conversation
-        return ToolResult(should_interrupt=False, content=None)
+            print(f"❌ OSCTool: Error: {e}")
+            return ToolResult(should_interrupt=False, content=f"Error: {str(e)}")
     
 
 class ToolRegistry:
@@ -293,11 +316,11 @@ class ToolRegistry:
     
     # Built-in tool types
     TOOL_TYPES = {
-        #'command': CommandTool,
-        #'search': SearchTool,
-        #'calculation': CalculationTool,
-        #'custom': CustomTool,
-        'lightcolor': LightColorTool,
+        'command': CommandTool,
+        'search': SearchTool,
+        'calculation': CalculationTool,
+        'custom': CustomTool,
+        'osc': OSCTool,
     }
     
     def __init__(self):
@@ -323,30 +346,133 @@ class ToolRegistry:
     def get_tool(self, name: str) -> Optional[Tool]:
         """Get a tool by name."""
         return self.tools.get(name)
+
+    def get_tool_definitions(self) -> list:
+        """Get tool definitions for system prompt injection.
+
+        Returns a list of dicts with name, description, and parameters for each tool.
+        """
+        from tool_parser import ToolDefinition
+
+        definitions = []
+        for name, tool in self.tools.items():
+            # Try to get description from tool docstring or config
+            description = tool.__class__.__doc__ or f"Execute {name} tool"
+            description = description.strip().split('\n')[0]  # First line only
+
+            # Build parameter schema based on tool type
+            parameters = {}
+            if isinstance(tool, CommandTool):
+                parameters = {
+                    'command': {
+                        'type': 'string',
+                        'description': 'The command to execute',
+                        'required': True
+                    }
+                }
+            elif isinstance(tool, SearchTool):
+                parameters = {
+                    'query': {
+                        'type': 'string',
+                        'description': 'The search query',
+                        'required': True
+                    }
+                }
+            elif isinstance(tool, CalculationTool):
+                parameters = {
+                    'expression': {
+                        'type': 'string',
+                        'description': 'The mathematical expression to evaluate',
+                        'required': True
+                    }
+                }
+            elif isinstance(tool, OSCTool):
+                # OSC tools use config for parameter name and description
+                param_name = tool.config.get('param_name', 'value')
+                param_desc = tool.config.get('param_description', 'The value to send')
+                parameters = {
+                    param_name: {
+                        'type': 'string',
+                        'description': param_desc,
+                        'required': True
+                    }
+                }
+                # Use configured description if available
+                if tool.config.get('description'):
+                    description = tool.config['description']
+            else:
+                # Generic parameter for custom tools
+                parameters = {
+                    'content': {
+                        'type': 'string',
+                        'description': 'The input content for the tool',
+                        'required': True
+                    }
+                }
+
+            definitions.append(ToolDefinition(
+                name=name,
+                description=description,
+                parameters=parameters
+            ))
+
+        return definitions
     
-    async def execute_tool(self, tool_call: ToolCall, context: Dict[str, Any] = None) -> ToolResult:
-        """Execute a tool call."""
-        tool = self.get_tool(tool_call.tag_name)
-        
-        if not tool:
-            return ToolResult(
-                should_interrupt=False,
-                content=f"Unknown tool: {tool_call.tag_name}"
-            )
-        
-        # Extract content between tags
-        import re
-        pattern = f'<{tool_call.tag_name}[^>]*>(.*?)</{tool_call.tag_name}>'
-        match = re.search(pattern, tool_call.content, re.DOTALL)
-        
-        if match:
-            content = match.group(1).strip()
-            return await tool.execute(content, context)
+    async def execute_tool(self, tool_name_or_call, input_params: Dict[str, Any] = None, context: Dict[str, Any] = None) -> Any:
+        """Execute a tool call.
+
+        Supports two calling conventions:
+        1. New format: execute_tool("tool_name", {"param": "value"})
+        2. Legacy format: execute_tool(ToolCall(tag_name="...", content="..."))
+        """
+        # Handle both old and new API
+        if isinstance(tool_name_or_call, str):
+            # New format: tool_name as string, input as dict
+            tool_name = tool_name_or_call
+            tool = self.get_tool(tool_name)
+            if not tool:
+                return f"Unknown tool: {tool_name}"
+
+            # Convert input dict to content string for tools that expect it
+            # Tools may expect different formats, so we try to be flexible
+            if input_params:
+                # If there's a single 'content' param, use it directly
+                if 'content' in input_params and len(input_params) == 1:
+                    content = str(input_params['content'])
+                else:
+                    # Otherwise, serialize the params
+                    import json
+                    content = json.dumps(input_params)
+            else:
+                content = ""
+
+            result = await tool.execute(content, context)
+            # Return just the content for the new format
+            return result.content if result.content else ""
         else:
-            return ToolResult(
-                should_interrupt=False,
-                content=f"Could not parse tool content"
-            )
+            # Legacy format: ToolCall object
+            tool_call = tool_name_or_call
+            tool = self.get_tool(tool_call.tag_name)
+
+            if not tool:
+                return ToolResult(
+                    should_interrupt=False,
+                    content=f"Unknown tool: {tool_call.tag_name}"
+                )
+
+            # Extract content between tags
+            import re
+            pattern = f'<{tool_call.tag_name}[^>]*>(.*?)</{tool_call.tag_name}>'
+            match = re.search(pattern, tool_call.content, re.DOTALL)
+
+            if match:
+                content = match.group(1).strip()
+                return await tool.execute(content, context)
+            else:
+                return ToolResult(
+                    should_interrupt=False,
+                    content=f"Could not parse tool content"
+                )
     
     def load_from_config(self, tools_config: Dict[str, Dict[str, Any]]):
         """
