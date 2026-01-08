@@ -231,6 +231,37 @@ class TitaNetVoiceFingerprinter:
         # Make a copy since the original array might be reused
         self._audio_write_queue.put((filepath, audio_data.copy(), sample_rate))
 
+    def save_audio_for_archive(self, message_id: str, start_frames: int, end_frames: int,
+                                archive_dir: str, sample_rate: int):
+        """Save user audio to archive directory with message_id filename (non-blocking)."""
+        if not archive_dir or not message_id:
+            return
+
+        try:
+            # Extract audio from buffer
+            audio_data = self._slice_audio(start_frames, end_frames, sample_rate)
+            if len(audio_data) == 0:
+                print(f"⚠️ [TITANET] No audio data found for {message_id} (frames {start_frames}-{end_frames})")
+                return
+
+            # Resample to 16kHz for consistent storage
+            target_sample_rate = 16000
+            if sample_rate != target_sample_rate:
+                from scipy import signal
+                num_samples = int(len(audio_data) * target_sample_rate / sample_rate)
+                audio_data = signal.resample(audio_data, num_samples)
+
+            # Create user subdirectory
+            user_dir = Path(archive_dir) / "user"
+            user_dir.mkdir(parents=True, exist_ok=True)
+
+            filepath = user_dir / f"{message_id}.wav"
+            # Queue for async saving
+            self._audio_write_queue.put((filepath, audio_data.copy(), target_sample_rate))
+            print(f"📝 [TITANET] Queued user audio for {message_id}")
+        except Exception as e:
+            print(f"⚠️ [TITANET] Error saving archive audio for {message_id}: {e}")
+
     def add_audio_chunk(self, audio_data: np.ndarray, num_frames_before_this: int, sample_rate: int):
         """Add raw audio data to the circular buffer for later processing."""
         # Debug: Check chunk timing
@@ -805,8 +836,48 @@ class TitaNetVoiceFingerprinter:
         
         # Save to disk
         self._save_reference_fingerprints()
-        
+
         print(f"✅ [TITANET] Merged {len(internal_ids)} speakers -> '{target_name}' ({len(merged_fingerprints)} fingerprints)")
+        return True
+
+    def delete_speaker(self, speaker_id: str) -> bool:
+        """Delete a speaker from the fingerprint database.
+
+        Args:
+            speaker_id: Speaker ID to delete (e.g., 'User 1' or 'unknown_speaker_1' or named speaker)
+
+        Returns:
+            True if successful, False otherwise
+        """
+        # Convert "User X" format to internal ID
+        internal_id = speaker_id
+        if speaker_id.startswith("User "):
+            try:
+                num = speaker_id.replace("User ", "")
+                internal_id = f"unknown_speaker_{num}"
+            except:
+                pass
+
+        # Check if speaker exists
+        if internal_id not in self.reference_fingerprints:
+            print(f"⚠️ [TITANET] Speaker '{internal_id}' not found")
+            return False
+
+        # Get fingerprint count for logging
+        fp_count = len(self.reference_fingerprints[internal_id])
+
+        # Delete from reference fingerprints
+        del self.reference_fingerprints[internal_id]
+
+        # Remove from session speakers mapping
+        for dg_id, sid in list(self.session_speakers.items()):
+            if sid == internal_id:
+                del self.session_speakers[dg_id]
+
+        # Save to disk
+        self._save_reference_fingerprints()
+
+        print(f"🗑️ [TITANET] Deleted speaker '{internal_id}' ({fp_count} fingerprints)")
         return True
 
     def _save_reference_fingerprints(self):

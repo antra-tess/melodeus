@@ -45,9 +45,13 @@ class CharacterConfig:
     
     # API key (can be character-specific)
     api_key: Optional[str] = None
-    
+
     # Prepared statements - pre-written responses that can be triggered
     prepared_statements: Dict[str, str] = field(default_factory=dict)
+
+    # Tools - list of tool names this character can use, or True for all tools
+    # None/False = no tools, list = specific tools, True = all tools
+    tools: Any = None
 
 
 @dataclass
@@ -87,31 +91,39 @@ class ConversationContext:
 
 class CharacterManager:
     """Manages multiple characters in a conversation."""
-    
-    def __init__(self, characters: Dict[str, CharacterConfig], director_config: DirectorConfig):
+
+    def __init__(self, characters: Dict[str, CharacterConfig], director_config: DirectorConfig, default_character: Optional[str] = None):
         """
         Initialize character manager.
-        
+
         Args:
             characters: Dictionary mapping character names to their configs
             director_config: Configuration for the director LLM
+            default_character: Optional name of the default character (uses first non-user if not set)
         """
         self.characters = characters
         self.director_config = director_config
         self.context = ConversationContext()
-        
+        self._default_character = default_character
+
         # Initialize LLM clients for each unique provider/key combination
         self._llm_clients = {}
         self._init_llm_clients()
-        
+
         # Initialize director client
         self._init_director_client()
-        
+
         # Track active character
         self.active_character: Optional[str] = None
-    
+
     def get_default_character(self) -> Optional[str]:
-        """Get the first available non-user character."""
+        """Get the default character for automatic responses."""
+        # Use configured default if set and valid
+        if self._default_character and self._default_character in self.characters:
+            print(f"🎯 Using configured default character: {self._default_character}")
+            return self._default_character
+        # Fall back to first non-user character
+        print(f"⚠️ No valid default_character configured (was: {self._default_character}), falling back to first character")
         for name, config in self.characters.items():
             if "user" not in name.lower():
                 return name
@@ -650,5 +662,9 @@ def create_character_manager(config: Dict[str, Any]) -> CharacterManager:
             director_data["api_key"] = api_keys.get("groq")
     
     director_config = DirectorConfig(**director_data)
-    
-    return CharacterManager(characters, director_config)
+
+    # Get default character from conversation config
+    conversation_config = config.get("conversation", {})
+    default_character = conversation_config.get("default_character")
+
+    return CharacterManager(characters, director_config, default_character)
