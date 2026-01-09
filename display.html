@@ -1,0 +1,833 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Melodeus — Live</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,400;0,500;0,600;1,400;1,500&family=JetBrains+Mono:wght@300&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-deep: #0a0a0f;
+            --bg-surface: #12121a;
+            --text-primary: #e8e4dc;
+            --text-secondary: #9a958a;
+            --text-dim: #5a564f;
+            --accent-gold: #c9a867;
+            --accent-ember: #d4724a;
+            --accent-violet: #8b7bb5;
+            --accent-teal: #5a9a8a;
+            --glow-thinking: rgba(139, 123, 181, 0.4);
+            --glow-speaking: rgba(201, 168, 103, 0.3);
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Cormorant Garamond', Georgia, serif;
+            background: var(--bg-deep);
+            color: var(--text-primary);
+            min-height: 100vh;
+            overflow: hidden;
+        }
+
+        /* Ambient background */
+        .ambient-bg {
+            position: fixed;
+            inset: 0;
+            background: 
+                radial-gradient(ellipse at 20% 80%, rgba(139, 123, 181, 0.08) 0%, transparent 50%),
+                radial-gradient(ellipse at 80% 20%, rgba(201, 168, 103, 0.06) 0%, transparent 50%),
+                radial-gradient(ellipse at 50% 50%, rgba(90, 154, 138, 0.04) 0%, transparent 70%);
+            pointer-events: none;
+            z-index: 0;
+        }
+
+        /* Status bar at top */
+        .status-bar {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 80px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 0 60px;
+            background: linear-gradient(to bottom, rgba(10, 10, 15, 0.95), transparent);
+            z-index: 100;
+        }
+
+        .connection-status {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 11px;
+            letter-spacing: 0.1em;
+            text-transform: uppercase;
+            color: var(--text-dim);
+        }
+
+        .connection-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: #4a4a4a;
+            transition: all 0.3s ease;
+        }
+
+        .connection-dot.connected {
+            background: var(--accent-teal);
+            box-shadow: 0 0 12px var(--accent-teal);
+        }
+
+        /* Next speaker indicator */
+        .next-speaker-indicator {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+            opacity: 0;
+            transform: translateY(-10px);
+            transition: all 0.4s ease;
+        }
+
+        .next-speaker-indicator.visible {
+            opacity: 1;
+            transform: translateY(0);
+        }
+
+        .next-label {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 10px;
+            letter-spacing: 0.15em;
+            text-transform: uppercase;
+            color: var(--text-dim);
+        }
+
+        .next-name {
+            font-size: 18px;
+            font-weight: 500;
+            color: var(--accent-gold);
+            font-style: italic;
+        }
+
+        /* Thinking indicator - center prominent */
+        .thinking-overlay {
+            position: fixed;
+            top: 80px;
+            left: 0;
+            right: 0;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 40px;
+            opacity: 0;
+            transform: translateY(-20px);
+            transition: all 0.5s ease;
+            pointer-events: none;
+            z-index: 50;
+        }
+
+        .thinking-overlay.visible {
+            opacity: 1;
+            transform: translateY(0);
+        }
+
+        .thinking-character {
+            font-size: 28px;
+            font-weight: 500;
+            font-style: italic;
+            color: var(--accent-violet);
+            text-shadow: 0 0 40px var(--glow-thinking);
+            animation: thoughtPulse 2s ease-in-out infinite;
+        }
+
+        .thinking-dots {
+            display: flex;
+            gap: 8px;
+            margin-top: 16px;
+        }
+
+        .thinking-dots span {
+            width: 6px;
+            height: 6px;
+            border-radius: 50%;
+            background: var(--accent-violet);
+            animation: dotPulse 1.4s ease-in-out infinite;
+        }
+
+        .thinking-dots span:nth-child(2) { animation-delay: 0.2s; }
+        .thinking-dots span:nth-child(3) { animation-delay: 0.4s; }
+
+        @keyframes thoughtPulse {
+            0%, 100% { opacity: 0.7; }
+            50% { opacity: 1; }
+        }
+
+        @keyframes dotPulse {
+            0%, 80%, 100% { transform: scale(0.8); opacity: 0.5; }
+            40% { transform: scale(1.2); opacity: 1; }
+        }
+
+        /* Main narrative area */
+        .narrative-container {
+            position: fixed;
+            top: 120px;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            overflow-y: auto;
+            overflow-x: hidden;
+            padding: 40px 15%;
+            z-index: 10;
+            scroll-behavior: smooth;
+        }
+
+        .narrative-container::-webkit-scrollbar {
+            width: 4px;
+        }
+
+        .narrative-container::-webkit-scrollbar-track {
+            background: transparent;
+        }
+
+        .narrative-container::-webkit-scrollbar-thumb {
+            background: var(--text-dim);
+            border-radius: 2px;
+        }
+
+        /* Message styling - narrative format */
+        .utterance {
+            margin-bottom: 48px;
+            opacity: 0;
+            transform: translateY(20px);
+            animation: fadeIn 0.6s ease forwards;
+        }
+
+        @keyframes fadeIn {
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        .utterance.streaming {
+            animation: none;
+            opacity: 1;
+            transform: translateY(0);
+        }
+
+        .utterance-speaker {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 11px;
+            letter-spacing: 0.2em;
+            text-transform: uppercase;
+            margin-bottom: 12px;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .utterance.human .utterance-speaker {
+            color: var(--accent-teal);
+        }
+
+        .utterance.ai .utterance-speaker {
+            color: var(--accent-gold);
+        }
+
+        .speaker-line {
+            flex: 1;
+            height: 1px;
+            background: linear-gradient(to right, currentColor, transparent);
+            opacity: 0.3;
+        }
+
+        .utterance-content {
+            font-size: 26px;
+            line-height: 1.7;
+            font-weight: 400;
+            max-width: 900px;
+        }
+
+        .utterance.human .utterance-content {
+            color: var(--text-secondary);
+            font-style: italic;
+        }
+
+        .utterance.ai .utterance-content {
+            color: var(--text-primary);
+        }
+
+        .utterance.ai.speaking .utterance-content {
+            text-shadow: 0 0 60px var(--glow-speaking);
+        }
+
+        /* Interim (live transcription) styling */
+        .utterance.interim {
+            opacity: 0.6;
+        }
+
+        .utterance.interim .utterance-content {
+            color: var(--text-dim);
+            font-style: italic;
+        }
+
+        .utterance.interim .utterance-speaker::after {
+            content: '...';
+            animation: ellipsis 1.5s infinite;
+        }
+
+        @keyframes ellipsis {
+            0%, 20% { content: '.'; }
+            40% { content: '..'; }
+            60%, 100% { content: '...'; }
+        }
+
+        /* Spoken vs pending text */
+        .spoken-text {
+            color: var(--text-primary);
+        }
+        
+        .pending-text {
+            color: var(--text-dim);
+            opacity: 0.3;
+        }
+
+        /* Cursor for streaming - sits between spoken and pending */
+        .streaming-cursor {
+            display: inline-block;
+            width: 2px;
+            height: 1em;
+            background: var(--accent-gold);
+            margin: 0 2px;
+            animation: cursorBlink 0.8s step-end infinite;
+            vertical-align: text-bottom;
+            box-shadow: 0 0 8px var(--accent-gold);
+        }
+
+        @keyframes cursorBlink {
+            0%, 50% { opacity: 1; }
+            51%, 100% { opacity: 0; }
+        }
+        
+        /* When no TTS progress yet, hide pending styling */
+        .utterance.streaming .utterance-content .spoken-text:empty + .streaming-cursor + .pending-text {
+            color: var(--text-primary);
+            opacity: 1;
+        }
+
+        /* Speaking indicator glow on body */
+        body.someone-speaking {
+            background: radial-gradient(ellipse at 50% 100%, rgba(201, 168, 103, 0.05) 0%, var(--bg-deep) 60%);
+        }
+
+        body.someone-thinking {
+            background: radial-gradient(ellipse at 50% 0%, rgba(139, 123, 181, 0.08) 0%, var(--bg-deep) 50%);
+        }
+
+        /* Bottom gradient fade */
+        .bottom-fade {
+            position: fixed;
+            bottom: 0;
+            left: 0;
+            right: 0;
+            height: 120px;
+            background: linear-gradient(to top, var(--bg-deep), transparent);
+            pointer-events: none;
+            z-index: 20;
+        }
+
+        /* Empty state */
+        .empty-state {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            text-align: center;
+            color: var(--text-dim);
+        }
+
+        .empty-state h2 {
+            font-size: 32px;
+            font-weight: 400;
+            font-style: italic;
+            margin-bottom: 16px;
+        }
+
+        .empty-state p {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 11px;
+            letter-spacing: 0.15em;
+            text-transform: uppercase;
+        }
+
+        /* Responsive */
+        @media (max-width: 1200px) {
+            .narrative-container {
+                padding: 40px 8%;
+            }
+            .utterance-content {
+                font-size: 22px;
+            }
+        }
+
+        @media (max-width: 768px) {
+            .narrative-container {
+                padding: 30px 5%;
+            }
+            .utterance-content {
+                font-size: 18px;
+            }
+            .status-bar {
+                padding: 0 20px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="ambient-bg"></div>
+
+    <!-- Status bar -->
+    <div class="status-bar">
+        <div class="connection-status">
+            <div class="connection-dot" id="connection-dot"></div>
+            <span id="connection-text">Connecting</span>
+        </div>
+        <div class="next-speaker-indicator" id="next-indicator">
+            <span class="next-label">Next</span>
+            <span class="next-name" id="next-speaker-name">—</span>
+        </div>
+    </div>
+
+    <!-- Thinking overlay -->
+    <div class="thinking-overlay" id="thinking-overlay">
+        <div class="thinking-character" id="thinking-character">Thinking...</div>
+        <div class="thinking-dots">
+            <span></span><span></span><span></span>
+        </div>
+    </div>
+
+    <!-- Narrative transcript -->
+    <div class="narrative-container" id="narrative">
+        <div class="empty-state" id="empty-state">
+            <h2>Awaiting voices...</h2>
+            <p>The conversation will appear here</p>
+        </div>
+    </div>
+
+    <div class="bottom-fade"></div>
+
+    <script>
+        let ws = null;
+        let isConnected = false;
+        let reconnectTimer = null;
+        const RECONNECT_DELAY_MS = 500;
+
+        let currentMessages = {};
+        let streamAccumulators = {};
+        let spokenAccumulators = {};  // Track TTS-spoken text per session
+        let thinkingCharacter = null;
+        let speakingCharacter = null;
+        let nextSpeaker = null;
+        let hasMessages = false;
+
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        function updateConnectionStatus(connected) {
+            isConnected = connected;
+            const dot = document.getElementById('connection-dot');
+            const text = document.getElementById('connection-text');
+            if (connected) {
+                dot.classList.add('connected');
+                text.textContent = 'Live';
+            } else {
+                dot.classList.remove('connected');
+                text.textContent = 'Reconnecting';
+            }
+        }
+
+        function scheduleReconnect() {
+            if (reconnectTimer !== null) return;
+            reconnectTimer = setTimeout(() => {
+                reconnectTimer = null;
+                connect();
+            }, RECONNECT_DELAY_MS);
+        }
+
+        function connect() {
+            const hostname = window.location.hostname || 'localhost';
+            ws = new WebSocket('ws://' + hostname + ':8795');
+
+            ws.onopen = () => {
+                console.log('Connected');
+                if (reconnectTimer !== null) {
+                    clearTimeout(reconnectTimer);
+                    reconnectTimer = null;
+                }
+                updateConnectionStatus(true);
+                ws.send(JSON.stringify({ type: 'ui_ready', data: { client_id: 'display' } }));
+            };
+
+            ws.onclose = () => {
+                console.log('Disconnected');
+                updateConnectionStatus(false);
+                scheduleReconnect();
+            };
+
+            ws.onerror = (error) => {
+                console.error('WebSocket error:', error);
+                updateConnectionStatus(false);
+                scheduleReconnect();
+            };
+
+            ws.onmessage = (event) => {
+                const msg = JSON.parse(event.data);
+                handleMessage(msg);
+            };
+        }
+
+        function handleMessage(msg) {
+            switch(msg.type) {
+                case 'speaker_status':
+                    updateSpeakerStatus(msg.data);
+                    break;
+                case 'transcription':
+                    handleTranscription(msg.data);
+                    break;
+                case 'ai_stream':
+                    handleAIStream(msg.data);
+                    break;
+                case 'ai_stream_start':
+                    handleAIStreamStart(msg.data);
+                    break;
+                case 'ai_stream_chunk':
+                    handleAIStreamChunk(msg.data);
+                    break;
+                case 'ai_stream_end':
+                    handleAIStreamEnd(msg.data);
+                    break;
+                case 'tts_progress':
+                    handleTTSProgress(msg.data);
+                    break;
+                case 'history':
+                case 'conversation_history':
+                    loadHistory(msg.data);
+                    break;
+                case 'last_ai_speaker_changed':
+                    updateNextSpeaker(msg.data.character);
+                    break;
+                case 'available_characters':
+                    // Could use for future features
+                    break;
+            }
+        }
+
+        function updateSpeakerStatus(data) {
+            // Handle thinking state
+            if (data.thinking_sound && data.pending_speaker) {
+                setThinking(data.pending_speaker);
+            } else if (data.is_processing && data.pending_speaker && !data.current_speaker) {
+                setThinking(data.pending_speaker);
+            } else {
+                setThinking(null);
+            }
+
+            // Handle speaking state
+            if (data.current_speaker && data.is_speaking) {
+                setSpeaking(data.current_speaker);
+            } else {
+                setSpeaking(null);
+            }
+        }
+
+        function setThinking(character) {
+            thinkingCharacter = character;
+            const overlay = document.getElementById('thinking-overlay');
+            const charName = document.getElementById('thinking-character');
+            
+            if (character) {
+                charName.textContent = character + ' is thinking...';
+                overlay.classList.add('visible');
+                document.body.classList.add('someone-thinking');
+            } else {
+                overlay.classList.remove('visible');
+                document.body.classList.remove('someone-thinking');
+            }
+        }
+
+        function setSpeaking(character) {
+            speakingCharacter = character;
+            
+            // Remove speaking class from all
+            document.querySelectorAll('.utterance.speaking').forEach(el => {
+                el.classList.remove('speaking');
+            });
+
+            if (character) {
+                document.body.classList.add('someone-speaking');
+                // Could highlight current speaker's message if needed
+            } else {
+                document.body.classList.remove('someone-speaking');
+            }
+        }
+
+        function updateNextSpeaker(character) {
+            nextSpeaker = character;
+            const indicator = document.getElementById('next-indicator');
+            const nameEl = document.getElementById('next-speaker-name');
+            
+            if (character) {
+                nameEl.textContent = character;
+                indicator.classList.add('visible');
+            } else {
+                indicator.classList.remove('visible');
+            }
+        }
+
+        function hideEmptyState() {
+            if (!hasMessages) {
+                hasMessages = true;
+                const empty = document.getElementById('empty-state');
+                if (empty) empty.style.display = 'none';
+            }
+        }
+
+        function handleTranscription(data) {
+            const narrative = document.getElementById('narrative');
+            hideEmptyState();
+
+            if (data.is_interim) {
+                let interim = document.getElementById('interim-utterance');
+                if (!interim) {
+                    interim = document.createElement('div');
+                    interim.id = 'interim-utterance';
+                    interim.className = 'utterance human interim';
+                    narrative.appendChild(interim);
+                }
+                interim.innerHTML = `
+                    <div class="utterance-speaker">
+                        <span>${escapeHtml(data.speaker || 'Human')}</span>
+                        <span class="speaker-line"></span>
+                    </div>
+                    <div class="utterance-content">${escapeHtml(data.text)}</div>
+                `;
+                narrative.scrollTop = narrative.scrollHeight;
+            } else if (data.is_final) {
+                const interim = document.getElementById('interim-utterance');
+                if (interim) interim.remove();
+
+                const utterance = document.createElement('div');
+                utterance.className = 'utterance human';
+                if (data.message_id) utterance.id = data.message_id;
+                utterance.innerHTML = `
+                    <div class="utterance-speaker">
+                        <span>${escapeHtml(data.speaker || 'Human')}</span>
+                        <span class="speaker-line"></span>
+                    </div>
+                    <div class="utterance-content">${escapeHtml(data.text)}</div>
+                `;
+                narrative.appendChild(utterance);
+                narrative.scrollTop = narrative.scrollHeight;
+            }
+        }
+
+        function handleAIStream(data) {
+            const narrative = document.getElementById('narrative');
+            hideEmptyState();
+            
+            let utterance = currentMessages[data.session_id];
+
+            if (!utterance) {
+                utterance = document.createElement('div');
+                utterance.className = 'utterance ai streaming';
+                utterance.setAttribute('data-session-id', data.session_id);
+                if (data.message_id) utterance.id = data.message_id;
+                utterance.innerHTML = `
+                    <div class="utterance-speaker">
+                        <span>${escapeHtml(data.speaker)}</span>
+                        <span class="speaker-line"></span>
+                    </div>
+                    <div class="utterance-content">
+                        <span class="spoken-text"></span><span class="streaming-cursor"></span><span class="pending-text"></span>
+                    </div>
+                `;
+                narrative.appendChild(utterance);
+                currentMessages[data.session_id] = utterance;
+                streamAccumulators[data.session_id] = '';
+                spokenAccumulators[data.session_id] = 0;  // char index spoken so far
+            }
+
+            // Accumulate full text from LLM
+            if (data.text) {
+                streamAccumulators[data.session_id] = (streamAccumulators[data.session_id] || '') + data.text;
+            }
+
+            // Update display - show spoken portion bright, pending portion dim
+            updateUtteranceDisplay(data.session_id);
+
+            narrative.scrollTop = narrative.scrollHeight;
+
+            // Complete
+            if (data.is_complete) {
+                if (data.message_id) utterance.id = data.message_id;
+                // Don't remove streaming class yet - wait for TTS to catch up
+                // Mark as generation complete
+                utterance.setAttribute('data-generation-complete', 'true');
+            }
+        }
+        
+        function handleTTSProgress(data) {
+            const sessionId = data.session_id;
+            if (!sessionId) return;
+            
+            // Update spoken position
+            spokenAccumulators[sessionId] = data.char_index;
+            
+            // Update display
+            updateUtteranceDisplay(sessionId);
+            
+            // Check if we should finalize (generation complete AND TTS caught up)
+            const utterance = currentMessages[sessionId];
+            if (utterance && utterance.getAttribute('data-generation-complete') === 'true') {
+                const fullText = streamAccumulators[sessionId] || '';
+                if (data.char_index >= fullText.length - 5) {  // TTS caught up (with small tolerance)
+                    finalizeUtterance(sessionId);
+                }
+            }
+        }
+        
+        function updateUtteranceDisplay(sessionId) {
+            const utterance = currentMessages[sessionId];
+            if (!utterance) return;
+            
+            const fullText = streamAccumulators[sessionId] || '';
+            const spokenIndex = spokenAccumulators[sessionId] || 0;
+            
+            const spokenText = fullText.substring(0, spokenIndex);
+            const pendingText = fullText.substring(spokenIndex);
+            
+            const spokenEl = utterance.querySelector('.spoken-text');
+            const pendingEl = utterance.querySelector('.pending-text');
+            
+            if (spokenEl) spokenEl.textContent = spokenText;
+            if (pendingEl) pendingEl.textContent = pendingText;
+            
+            document.getElementById('narrative').scrollTop = document.getElementById('narrative').scrollHeight;
+        }
+        
+        function finalizeUtterance(sessionId) {
+            const utterance = currentMessages[sessionId];
+            if (!utterance) return;
+            
+            utterance.classList.remove('streaming');
+            const content = utterance.querySelector('.utterance-content');
+            if (content) {
+                content.innerHTML = escapeHtml(streamAccumulators[sessionId] || '');
+            }
+            delete currentMessages[sessionId];
+            delete streamAccumulators[sessionId];
+            delete spokenAccumulators[sessionId];
+        }
+
+        function handleAIStreamStart(data) {
+            const narrative = document.getElementById('narrative');
+            hideEmptyState();
+            
+            const utterance = document.createElement('div');
+            utterance.className = 'utterance ai streaming';
+            utterance.setAttribute('data-session-id', data.session_id);
+            if (data.message_id) utterance.id = data.message_id;
+            utterance.innerHTML = `
+                <div class="utterance-speaker">
+                    <span>${escapeHtml(data.speaker)}</span>
+                    <span class="speaker-line"></span>
+                </div>
+                <div class="utterance-content"><span class="streaming-cursor"></span></div>
+            `;
+            narrative.appendChild(utterance);
+            currentMessages[data.session_id] = utterance;
+            streamAccumulators[data.session_id] = '';
+            narrative.scrollTop = narrative.scrollHeight;
+        }
+
+        function handleAIStreamChunk(data) {
+            let utterance = currentMessages[data.session_id];
+            if (!utterance) return;
+
+            streamAccumulators[data.session_id] = (streamAccumulators[data.session_id] || '') + data.text;
+            
+            const content = utterance.querySelector('.utterance-content');
+            if (content) {
+                content.innerHTML = escapeHtml(streamAccumulators[data.session_id]) + '<span class="streaming-cursor"></span>';
+            }
+            
+            document.getElementById('narrative').scrollTop = document.getElementById('narrative').scrollHeight;
+        }
+
+        function handleAIStreamEnd(data) {
+            let utterance = currentMessages[data.session_id];
+            if (!utterance) return;
+
+            if (data.message_id) utterance.id = data.message_id;
+            utterance.classList.remove('streaming');
+            
+            const content = utterance.querySelector('.utterance-content');
+            if (content) {
+                content.innerHTML = escapeHtml(streamAccumulators[data.session_id] || '');
+            }
+            
+            delete currentMessages[data.session_id];
+            delete streamAccumulators[data.session_id];
+        }
+
+        function loadHistory(data) {
+            const narrative = document.getElementById('narrative');
+            const turns = data.turns || data.history || [];
+            
+            if (turns.length === 0) return;
+            
+            hideEmptyState();
+            narrative.innerHTML = '';
+
+            turns.forEach((turn, index) => {
+                const isAI = turn.role === 'assistant' || turn.role === 'ai';
+                const utterance = document.createElement('div');
+                utterance.className = `utterance ${isAI ? 'ai' : 'human'}`;
+                if (turn.message_id) utterance.id = turn.message_id;
+                
+                // Determine speaker name
+                let speaker = turn.speaker || turn.name || (isAI ? 'AI' : 'Human');
+                
+                utterance.innerHTML = `
+                    <div class="utterance-speaker">
+                        <span>${escapeHtml(speaker)}</span>
+                        <span class="speaker-line"></span>
+                    </div>
+                    <div class="utterance-content">${escapeHtml(turn.content || turn.text || '')}</div>
+                `;
+                utterance.style.animationDelay = `${index * 0.05}s`;
+                narrative.appendChild(utterance);
+            });
+
+            // Scroll to bottom after render
+            window.requestAnimationFrame(() => {
+                narrative.scrollTop = narrative.scrollHeight;
+            });
+        }
+
+        // Start connection
+        connect();
+    </script>
+</body>
+</html>

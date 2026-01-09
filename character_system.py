@@ -34,7 +34,13 @@ class CharacterConfig:
     # Character personality/prompt
     system_prompt: str = ""
     
-    # Prefill name (for Anthropic prefill mode)
+    # Inner name (what this model sees for its own messages in context)
+    inner_name: Optional[str] = None
+    
+    # Discord name (what other models see for this character's messages)
+    discord_name: Optional[str] = None
+    
+    # Prefill name (deprecated, use inner_name/discord_name instead)
     prefill_name: Optional[str] = None
    
     # Conversation settings
@@ -229,13 +235,13 @@ class CharacterManager:
                 speaker_name = turn.get("speaker_name", "H")
                 recent_turns.append(f"{speaker_name}: {content}")
             elif role == "assistant":
-                # Use character name or prefill name if available
+                # Use character name or discord name if available
                 if character:
                     char_config = self.characters.get(character)
-                    if char_config and char_config.prefill_name:
-                        recent_turns.append(f"{char_config.prefill_name}: {content}")
-                    else:
-                        recent_turns.append(f"{character}: {content}")
+                    display_name = None
+                    if char_config:
+                        display_name = char_config.discord_name or char_config.inner_name or char_config.prefill_name
+                    recent_turns.append(f"{display_name or character}: {content}")
                 else:
                     # Check if content already has a speaker prefix to avoid duplication
                     # This can happen when loading from history files
@@ -370,11 +376,12 @@ class CharacterManager:
                 )
                 next_speaker = response.choices[0].message.content.strip()
             
-            # Build list of valid options including prefill names
+            # Build list of valid options including inner/discord/prefill names
             valid_options = ["H", "USER"] + list(self.characters.keys())  # Accept both H and USER for compatibility
             for char_config in self.characters.values():
-                if char_config.prefill_name and char_config.prefill_name not in valid_options:
-                    valid_options.append(char_config.prefill_name)
+                for name in [char_config.inner_name, char_config.discord_name, char_config.prefill_name]:
+                    if name and name not in valid_options:
+                        valid_options.append(name)
             
             # Log director response
             response_timestamp = time.time()
@@ -408,11 +415,12 @@ class CharacterManager:
             if next_speaker in self.characters:
                 return next_speaker
             
-            # Check if it's a prefill name
+            # Check if it's an inner/discord/prefill name
             for char_name, char_config in self.characters.items():
-                if char_config.prefill_name and char_config.prefill_name == next_speaker:
-                    print(f"🎭 Director used prefill name '{next_speaker}', mapping to character '{char_name}'")
-                    return char_name
+                if next_speaker in [char_config.inner_name, char_config.discord_name, char_config.prefill_name]:
+                    if next_speaker:  # Make sure it's not None
+                        print(f"🎭 Director used display name '{next_speaker}', mapping to character '{char_name}'")
+                        return char_name
             
             # Check if it's a detected speaker from voice fingerprinting
             # These are valid user speakers, so treat as USER

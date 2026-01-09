@@ -1502,7 +1502,8 @@ class UnifiedVoiceConversation:
 
         if use_prefill:
             # For prefill mode, convert directly from raw history
-            prefill_name = character_config.prefill_name or character_config.name
+            # Use inner_name for what the model sees for its own messages
+            prefill_name = character_config.inner_name or character_config.prefill_name or character_config.name
             raw_history = self._get_conversation_history_for_character()
             
             # Get character histories from current context if available
@@ -1669,12 +1670,24 @@ class UnifiedVoiceConversation:
                         is_speaking=True,  # Now actually speaking
                         current_speaker=next_speaker
                     )
+            
+            # Progress callback to broadcast TTS playback position
+            async def tts_progress_callback(spoken_text: str, char_index: int):
+                if hasattr(self, 'ui_server'):
+                    await self.ui_server.broadcast_tts_progress(
+                        speaker=next_speaker,
+                        spoken_text=spoken_text,
+                        char_index=char_index,
+                        session_id=ui_session_id
+                    )
+            
             speak_text = self.tts.speak_text(
                 text_stream,
                 stop_thinking_for_generation,
                 self.osc_client,
                 self.config.osc.speaking_start_address,
-                pending_message_id
+                pending_message_id,
+                progress_callback=tts_progress_callback
             )
             self.speak_text_task = asyncio.create_task(speak_text)
             print("waiting for speak text")
@@ -2533,7 +2546,8 @@ class UnifiedVoiceConversation:
             
             if use_prefill:
                 # For prefill mode, convert directly from raw history
-                prefill_name = character_config.prefill_name or character_config.name
+                # Use inner_name for what the model sees for its own messages
+                prefill_name = character_config.inner_name or character_config.prefill_name or character_config.name
 
                 # Inject system message with tool instructions FIRST (before fetching history)
                 self._maybe_inject_system_message(character_config)
@@ -2702,6 +2716,16 @@ class UnifiedVoiceConversation:
                             # Small delay to simulate natural streaming
                             await asyncio.sleep(0.02)
                         '''
+                    # Progress callback for TTS
+                    async def tts_progress_callback(spoken_text: str, char_index: int):
+                        if hasattr(self, 'ui_server'):
+                            await self.ui_server.broadcast_tts_progress(
+                                speaker=next_speaker,
+                                spoken_text=spoken_text,
+                                char_index=char_index,
+                                session_id=ui_session_id
+                            )
+                    
                     # Create TTS task for the prepared statement
                     self.state.current_llm_task = asyncio.create_task(
                         self.tts.speak_text(
@@ -2709,7 +2733,8 @@ class UnifiedVoiceConversation:
                             stop_thinking_for_generation,
                             self.osc_client,
                             self.config.osc.speaking_start_address,
-                            pending_message_id
+                            pending_message_id,
+                            progress_callback=tts_progress_callback
                         )
                     )
                     
@@ -2750,6 +2775,16 @@ class UnifiedVoiceConversation:
                 # Temporarily set character voice
                 original_config = self._set_character_voice(character_config)
                 try:
+                    # Progress callback for TTS
+                    async def tts_progress_callback_openai(spoken_text: str, char_index: int):
+                        if hasattr(self, 'ui_server'):
+                            await self.ui_server.broadcast_tts_progress(
+                                speaker=next_speaker,
+                                spoken_text=spoken_text,
+                                char_index=char_index,
+                                session_id=ui_session_id
+                            )
+                    
                     # Create TTS task for this character
                     self.state.current_llm_task = asyncio.create_task(
                         self.tts.speak_text(
@@ -2757,7 +2792,8 @@ class UnifiedVoiceConversation:
                             stop_thinking_for_generation,
                             self.osc_client,
                             self.config.osc.speaking_start_address,
-                            pending_message_id
+                            pending_message_id,
+                            progress_callback=tts_progress_callback_openai
                         )
                     )
                     
@@ -2799,6 +2835,16 @@ class UnifiedVoiceConversation:
                 # Temporarily set character voice
                 original_config = self._set_character_voice(character_config)
                 try:
+                    # Progress callback for TTS
+                    async def tts_progress_callback_anthropic(spoken_text: str, char_index: int):
+                        if hasattr(self, 'ui_server'):
+                            await self.ui_server.broadcast_tts_progress(
+                                speaker=next_speaker,
+                                spoken_text=spoken_text,
+                                char_index=char_index,
+                                session_id=ui_session_id
+                            )
+                    
                     # Create TTS task for this character
                     self.state.current_llm_task = asyncio.create_task(
                         self.tts.speak_text(
@@ -2806,7 +2852,8 @@ class UnifiedVoiceConversation:
                             stop_thinking_for_generation,
                             self.osc_client,
                             self.config.osc.speaking_start_address,
-                            pending_message_id
+                            pending_message_id,
+                            progress_callback=tts_progress_callback_anthropic
                         )
                     )
                     
@@ -2853,6 +2900,16 @@ class UnifiedVoiceConversation:
                 # Temporarily set character voice
                 original_config = self._set_character_voice(character_config)
                 try:
+                    # Progress callback for TTS
+                    async def tts_progress_callback_bedrock(spoken_text: str, char_index: int):
+                        if hasattr(self, 'ui_server'):
+                            await self.ui_server.broadcast_tts_progress(
+                                speaker=next_speaker,
+                                spoken_text=spoken_text,
+                                char_index=char_index,
+                                session_id=ui_session_id
+                            )
+                    
                     # Create TTS task for this character
                     self.state.current_llm_task = asyncio.create_task(
                         self.tts.speak_text(
@@ -2860,7 +2917,8 @@ class UnifiedVoiceConversation:
                             stop_thinking_for_generation,
                             self.osc_client,
                             self.config.osc.speaking_start_address,
-                            pending_message_id
+                            pending_message_id,
+                            progress_callback=tts_progress_callback_bedrock
                         )
                     )
                     
@@ -4050,11 +4108,12 @@ class UnifiedVoiceConversation:
         print(f"📢 Injected system message into context '{active_context.config.name}' and state history")
 
     def _format_turn_for_prefill(self, role: str, content: Any, character: Optional[str],
-                                 current_character: str, prefill_name: str, speaker_name: Optional[str] = None,
+                                 current_character: str, inner_name: str, speaker_name: Optional[str] = None,
                                  include_eot: bool = True) -> Optional[str]:
         """Format a single turn for prefill conversation.
 
         Args:
+            inner_name: The inner name for the current character (what it sees for its own messages)
             include_eot: If True, append EOT token at end to mark turn boundary.
                         Set to False for the current turn being generated.
         """
@@ -4078,13 +4137,15 @@ class UnifiedVoiceConversation:
         elif role == "assistant":
             # Character messages
             if character == current_character:
-                # This character's own messages
-                return f"{prefill_name}: {content}{eot}"
+                # This character's own messages - use inner_name
+                return f"{inner_name}: {content}{eot}"
             elif character:
-                # Other character's messages - get their prefill name
+                # Other character's messages - use their discord_name (how others see them)
                 other_config = self.character_manager.get_character_config(character)
-                if other_config and other_config.prefill_name:
-                    return f"{other_config.prefill_name}: {content}{eot}"
+                if other_config:
+                    # Prefer discord_name, fall back to inner_name, then prefill_name, then character name
+                    display_name = other_config.discord_name or other_config.inner_name or other_config.prefill_name or character
+                    return f"{display_name}: {content}{eot}"
                 else:
                     return f"{character}: {content}{eot}"
             else:

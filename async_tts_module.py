@@ -209,12 +209,24 @@ class AsyncTTSStreamer:
         settings_str = "_".join(f"{k}:{v}" for k, v in sorted(voice_settings.items()))
         return f"{voice_id}_{settings_str}"
 
-    async def _osc_emit_helper(self, osc_client, osc_client_address):
+    async def _osc_emit_helper(self, osc_client, osc_client_address, progress_callback=None):
         try:
             prev_offset = 0
+            prev_progress_offset = 0
             appended_text = ""
             while True:
                 offset_in_original_text = self.get_current_index_in_text()
+                
+                # Send progress callback with full text up to current position (preserves punctuation)
+                if progress_callback and prev_progress_offset < offset_in_original_text:
+                    spoken_text = self.generated_text[:offset_in_original_text]
+                    try:
+                        await progress_callback(spoken_text, offset_in_original_text)
+                    except Exception as e:
+                        print(f"Progress callback error: {e}")
+                    prev_progress_offset = offset_in_original_text
+                
+                # OSC word emission (existing behavior)
                 if prev_offset < offset_in_original_text:
                     match = re.search(r"\w+\b", self.generated_text[prev_offset:])
                     if match:
@@ -235,12 +247,13 @@ class AsyncTTSStreamer:
             print("Error in osc emit")
 
 
-    async def _speak_text_helper(self, text_generator: AsyncGenerator[str, None], first_audio_callback, osc_client, osc_client_address) -> bool:
+    async def _speak_text_helper(self, text_generator: AsyncGenerator[str, None], first_audio_callback, osc_client, osc_client_address, progress_callback=None) -> bool:
         """
         Speak the given text (task that can be canceled)
         
         Args:
             text_generator: yields text to convert to speech
+            progress_callback: async callback(spoken_text, char_index) called as TTS progresses
             
         Returns:
             bool: True if completed successfully, False if interrupted
@@ -253,7 +266,7 @@ class AsyncTTSStreamer:
         osc_emit_task = None
         start_time_played = None
         try:
-            osc_emit_task = asyncio.create_task(self._osc_emit_helper(osc_client, osc_client_address))
+            osc_emit_task = asyncio.create_task(self._osc_emit_helper(osc_client, osc_client_address, progress_callback))
             audio_stream = ensure_stream_started()
             audios = []
             async def flush_websocket(websocket):
@@ -455,7 +468,7 @@ class AsyncTTSStreamer:
         #print(self.generated_text)
         return trimmed_end(self.generated_text, played_text)
 
-    async def speak_text(self, text_generator: AsyncGenerator[str, None], first_audio_callback, osc_client, osc_client_address, message_id: Optional[str] = None):
+    async def speak_text(self, text_generator: AsyncGenerator[str, None], first_audio_callback, osc_client, osc_client_address, message_id: Optional[str] = None, progress_callback=None):
         # interrupt (if already running)
         await self.interrupt()
 
@@ -463,7 +476,7 @@ class AsyncTTSStreamer:
         self._current_message_id = message_id
 
         # start the task (this way it's cancellable and we don't need to spam checks)
-        self.speak_task = asyncio.create_task(self._speak_text_helper(text_generator, first_audio_callback, osc_client, osc_client_address))
+        self.speak_task = asyncio.create_task(self._speak_text_helper(text_generator, first_audio_callback, osc_client, osc_client_address, progress_callback))
 
         # wait for it to finish
         result = await self.speak_task
