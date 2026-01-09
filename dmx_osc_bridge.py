@@ -1178,6 +1178,12 @@ class DMXOSCBridge:
         # Start new pulse task
         task = asyncio.create_task(self._pulse_character(character_name))
         self.pulse_tasks[character_name] = task
+        
+        # Also raise the X32 bus fader so thinking sound comes from mannequin speaker
+        if character_name in self.character_x32 and self.x32_client:
+            x32 = self.character_x32[character_name]
+            self._x32_set_channel(x32, character_name, active=True)
+        
         await self._broadcast_event("thinking_start", character=character_name)
         await self._broadcast_state()
     
