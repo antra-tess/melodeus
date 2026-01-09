@@ -1638,6 +1638,10 @@ class UnifiedVoiceConversation:
                 )
             else:
                 next_speaker = speaker
+            
+            # Send OSC thinking start (for pulsing light)
+            if next_speaker:
+                self._send_osc_thinking_start(next_speaker)
 
             # Validate that the character exists
             if not self.character_manager.get_character_config(next_speaker):
@@ -1656,6 +1660,9 @@ class UnifiedVoiceConversation:
 
             async def stop_thinking_for_generation():
                 await self.thinking_sound.interrupt()
+                # Send OSC thinking stop and speaking start when character begins speaking
+                self._send_osc_thinking_stop(next_speaker)
+                self._send_osc_speaking_start(next_speaker)
                 if hasattr(self, 'ui_server'):
                     await self.ui_server.broadcast_speaker_status(
                         thinking_sound=False,
@@ -1673,7 +1680,8 @@ class UnifiedVoiceConversation:
             print("waiting for speak text")
             await self.speak_text_task
             print("done with speak text")
-            
+            # Send OSC speaking stop when character finishes speaking
+            self._send_osc_speaking_stop(next_speaker)
 
         except asyncio.CancelledError:
             completed = False
@@ -1683,6 +1691,9 @@ class UnifiedVoiceConversation:
                 self.speak_text_task.cancel()
                 await self.speak_text_task
                 self.speak_text_task = None
+            # Send OSC speaking stop on cancellation
+            if next_speaker:
+                self._send_osc_speaking_stop(next_speaker)
             print("Canceled get llm output")
             raise
         except Exception as e:
@@ -4392,6 +4403,30 @@ class UnifiedVoiceConversation:
             print(f"❌ OSC send error: {type(e).__name__}: {e}")
             import traceback
             traceback.print_exc()
+    
+    def _send_osc_thinking_start(self, character_name: str):
+        """Send OSC message when character starts thinking (waiting for LLM)."""
+        if not self.config.osc or not self.config.osc.enabled or not self.osc_client:
+            return
+            
+        try:
+            address = "/character/thinking/start"
+            print(f"📡 OSC: Thinking start - {character_name}")
+            self.osc_client.send_message(address, character_name)
+        except Exception as e:
+            print(f"❌ OSC thinking start error: {e}")
+    
+    def _send_osc_thinking_stop(self, character_name: str):
+        """Send OSC message when character stops thinking."""
+        if not self.config.osc or not self.config.osc.enabled or not self.osc_client:
+            return
+            
+        try:
+            address = "/character/thinking/stop"
+            print(f"📡 OSC: Thinking stop - {character_name}")
+            self.osc_client.send_message(address, character_name)
+        except Exception as e:
+            print(f"❌ OSC thinking stop error: {e}")
     
     def _send_osc_color_change(self, character_name: str, color: str):
         """Send OSC message when character changes color."""
