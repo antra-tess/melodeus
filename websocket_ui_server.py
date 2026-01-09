@@ -720,6 +720,19 @@ class VoiceUIServer:
             type="ai_stream",
             data=message_data
         ))
+    
+    async def broadcast_tts_progress(self, speaker: str, spoken_text: str, char_index: int, session_id: str = ""):
+        """Broadcast TTS playback progress (text revealed so far)."""
+        await self.broadcast(UIMessage(
+            type="tts_progress",
+            data={
+                "speaker": speaker,
+                "spoken_text": spoken_text,
+                "char_index": char_index,
+                "session_id": session_id,
+                "timestamp": time.time()
+            }
+        ))
         
     async def broadcast_system_status(self):
         """Broadcast system status update."""
