@@ -734,13 +734,16 @@ DASHBOARD_HTML = """
         }
         
         function hexToRgb(hex) {
+            // Returns [R, G, B, W, Amber, UV] for ADJ 7P fixtures
             const result = /^#?([a-f\\d]{2})([a-f\\d]{2})([a-f\\d]{2})$/i.exec(hex);
             return result ? [
                 parseInt(result[1], 16),
                 parseInt(result[2], 16),
                 parseInt(result[3], 16),
-                200
-            ] : [255, 255, 255, 200];
+                0,   // White
+                0,   // Amber
+                0    // UV
+            ] : [255, 255, 255, 0, 0, 0];
         }
         
         function sendCommand(cmd, data = {}) {
@@ -1241,6 +1244,7 @@ class DMXOSCBridge:
     async def _handle_dashboard_command(self, data: dict, ws):
         """Handle commands from the dashboard."""
         cmd = data.get("command")
+        print(f"📥 Dashboard command: {cmd} - {data}")
         
         if cmd == "activate":
             await self._activate_character(data["character"])
@@ -1476,6 +1480,7 @@ class DMXOSCBridge:
         dispatcher.map("/character/thinking/start", self._on_thinking_start)
         dispatcher.map("/character/thinking/stop", self._on_thinking_stop)
         dispatcher.map("/character/move_body", self._on_move_body)
+        dispatcher.map("/avatar/color", self._on_avatar_color)
         dispatcher.map("/test", self._on_test)
         dispatcher.set_default_handler(self._on_unknown)
         
@@ -1624,6 +1629,93 @@ class DMXOSCBridge:
         
         # Broadcast update
         asyncio.create_task(self._broadcast_state())
+    
+    def _on_avatar_color(self, address, character_name, *rgb_args):
+        """Handle avatar color change request.
+        
+        Args:
+            character_name: The character whose color to change
+            rgb_args: RGB values - can be [r, g, b] or individual args
+        """
+        print(f"🎨 Color change request: {character_name} -> {rgb_args}")
+        
+        # Parse RGB values
+        try:
+            if len(rgb_args) == 1 and isinstance(rgb_args[0], str):
+                # It's a JSON string like "[255, 0, 0]"
+                import json
+                rgb = json.loads(rgb_args[0])
+            elif len(rgb_args) == 3:
+                # Individual r, g, b args
+                rgb = list(rgb_args)
+            elif len(rgb_args) == 1 and isinstance(rgb_args[0], (list, tuple)):
+                rgb = list(rgb_args[0])
+            else:
+                print(f"   ❌ Invalid RGB format: {rgb_args}")
+                return
+            
+            if len(rgb) != 3:
+                print(f"   ❌ Need 3 RGB values, got {len(rgb)}")
+                return
+            
+            r, g, b = int(rgb[0]), int(rgb[1]), int(rgb[2])
+            print(f"   ✨ Setting {character_name} color to RGB({r}, {g}, {b})")
+            
+            asyncio.create_task(self._set_character_color_async(character_name, r, g, b))
+            
+        except Exception as e:
+            print(f"   ❌ Error parsing color: {e}")
+    
+    async def _set_character_color_async(self, character_name: str, r: int, g: int, b: int):
+        """Set a character's par can color."""
+        # Find the character's fixtures
+        effective_body = self._get_effective_body(character_name)
+        
+        if effective_body not in self.character_fixtures:
+            print(f"   ❌ Character {character_name} (body: {effective_body}) not found")
+            return
+        
+        fixtures = self.character_fixtures[effective_body]
+        if not fixtures.par_can:
+            print(f"   ❌ No par can configured for {effective_body}")
+            return
+        
+        if effective_body not in self.dmx_channels:
+            print(f"   ❌ No DMX channel for {effective_body}")
+            return
+        
+        par = fixtures.par_can
+        channel = self.dmx_channels[effective_body]
+        
+        # Update the stored color (R, G, B, Lime, Amber, UV)
+        # Keep lime, amber, UV as they were, just update RGB
+        old_color = par.color
+        par.color = (r, g, b, old_color[3] if len(old_color) > 3 else 0, 
+                     old_color[4] if len(old_color) > 4 else 0,
+                     old_color[5] if len(old_color) > 5 else 0)
+        
+        # Get current brightness (or default to active)
+        is_speaking = effective_body in self.speaking_characters
+        brightness = par.active_brightness if is_speaking else par.idle_brightness
+        
+        # Build DMX values
+        dmx_values = [
+            int(r * brightness),      # R
+            int(g * brightness),      # G
+            int(b * brightness),      # B
+            int(par.color[3] * brightness),  # Lime
+            int(par.color[4] * brightness),  # Amber
+            int(par.color[5]),               # UV (no brightness scaling)
+            255,                              # Strobe (255 = solid on)
+            255                               # Dimmer (full)
+        ]
+        
+        # Send to DMX
+        channel.set_values(dmx_values)
+        print(f"   ✅ Set {effective_body} to RGB({r},{g},{b}) @ {brightness*100:.0f}%")
+        
+        # Broadcast state update
+        await self._broadcast_state()
     
     def _get_effective_body(self, character_name: str) -> str:
         """Get the body a character is currently using (their own or a possessed one)."""
