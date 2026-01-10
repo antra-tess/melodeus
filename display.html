@@ -84,7 +84,7 @@
 
         .connection-dot.connected {
             background: var(--accent-teal);
-            box-shadow: 0 0 12px var(--accent-teal);
+            /* Removed glow for better contrast */
         }
 
         /* Next speaker indicator */
@@ -144,7 +144,7 @@
             font-weight: 500;
             font-style: italic;
             color: var(--accent-violet);
-            text-shadow: 0 0 40px var(--glow-thinking);
+            /* Removed glow effect for better contrast */
             animation: thoughtPulse 2s ease-in-out infinite;
         }
 
@@ -266,7 +266,7 @@
         }
 
         .utterance.ai.speaking .utterance-content {
-            text-shadow: 0 0 60px var(--glow-speaking);
+            /* Removed glow effect for better contrast */
         }
 
         /* Interim (live transcription) styling */
@@ -309,7 +309,7 @@
             margin: 0 2px;
             animation: cursorBlink 0.8s step-end infinite;
             vertical-align: text-bottom;
-            box-shadow: 0 0 8px var(--accent-gold);
+            /* Removed glow for better contrast */
         }
 
         @keyframes cursorBlink {
@@ -323,9 +323,9 @@
             opacity: 1;
         }
 
-        /* Speaking indicator glow on body */
+        /* Speaking indicator - removed glow for better contrast */
         body.someone-speaking {
-            background: radial-gradient(ellipse at 50% 100%, rgba(201, 168, 103, 0.05) 0%, var(--bg-deep) 60%);
+            /* No background change */
         }
 
         body.someone-thinking {
@@ -530,7 +530,26 @@
                 case 'available_characters':
                     // Could use for future features
                     break;
+                case 'message_updated':
+                    handleMessageUpdated(msg.data);
+                    break;
+                case 'message_deleted':
+                    handleMessageDeleted(msg.data);
+                    break;
             }
+        }
+
+        function handleMessageUpdated(data) {
+            const msg = document.getElementById(data.id);
+            if (msg) {
+                const content = msg.querySelector('.utterance-content');
+                if (content) content.textContent = data.new_text;
+            }
+        }
+
+        function handleMessageDeleted(data) {
+            const msg = document.getElementById(data.id);
+            if (msg) msg.remove();
         }
 
         function updateSpeakerStatus(data) {

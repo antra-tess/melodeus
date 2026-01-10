@@ -300,40 +300,41 @@ def format_tool_definitions(tools: List[ToolDefinition]) -> str:
 
 def get_tool_instructions(tools: List[ToolDefinition]) -> str:
     """
-    Get complete tool instructions for system prompt injection.
-    Includes definitions and usage example.
+    Get tool usage instructions for system prompt injection.
+    Shows the exact XML format needed to call tools.
     """
-    # Format definitions
-    definitions = []
+    # Build concrete examples for each tool
+    examples = []
     for tool in tools:
-        tool_def = {
-            'description': tool.description,
-            'name': tool.name,
-            'parameters': {
-                'type': 'object',
-                'properties': tool.parameters,
-                'required': [k for k, v in tool.parameters.items() if v.get('required')]
-            }
-        }
-        definitions.append(f'<function>{json.dumps(tool_def)}</function>')
+        param_lines = []
+        for param_name, param in tool.parameters.items():
+            example_value = param.get('example', f'{param_name}_value')
+            param_lines.append(f'<parameter name="{param_name}">{example_value}</parameter>')
+        
+        example = f"""<function_calls>
+<invoke name="{tool.name}">
+{chr(10).join(param_lines)}
+</invoke>
+</function_calls>"""
+        examples.append(f"To use {tool.name}:\n{example}")
 
-    return f"""<functions>
-{chr(10).join(definitions)}
-</functions>
+    return f"""To use a tool, output this exact XML format:
 
-When you need to use a tool, output the following XML format:
-{FUNC_CALLS_OPEN}
-{INVOKE_OPEN}tool_name">
-{PARAM_OPEN}parameter_name">value{PARAM_CLOSE}
-{INVOKE_CLOSE}
-{FUNC_CALLS_CLOSE}
+<function_calls>
+<invoke name="TOOL_NAME">
+<parameter name="PARAM_NAME">value</parameter>
+</invoke>
+</function_calls>
 
-When making function calls with array or object parameters, use JSON format:
-{FUNC_CALLS_OPEN}
-{INVOKE_OPEN}example_tool">
-{PARAM_OPEN}items">[{{"key": "value"}}]{PARAM_CLOSE}
-{INVOKE_CLOSE}
-{FUNC_CALLS_CLOSE}"""
+For array parameters, use JSON inside the parameter tags:
+
+<function_calls>
+<invoke name="set_color">
+<parameter name="rgb">[255, 0, 0]</parameter>
+</invoke>
+</function_calls>
+
+{chr(10).join(examples)}"""
 
 
 def inject_tools_into_system(system: str, tools: List[ToolDefinition]) -> str:
