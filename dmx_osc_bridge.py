@@ -28,9 +28,13 @@ import argparse
 import yaml
 import time
 import json
+import os
 from dataclasses import dataclass, field, asdict
 from typing import Dict, List, Optional, Tuple, Set
 from pathlib import Path
+
+# Persistent state file (stores master volume, per-character volumes, etc.)
+STATE_FILE = Path(__file__).parent / ".dmx_bridge_state.json"
 
 # OSC
 from pythonosc import udp_client
@@ -960,6 +964,10 @@ class DMXOSCBridge:
         self.current_x32_muted: Dict[str, bool] = {}
         self.last_update: Dict[str, float] = {}
         self.master_volume: float = 0.75  # Master volume multiplier for all mannequin voices
+        self.character_volumes: Dict[str, float] = {}  # Per-character volume adjustments (for uneven TTS loudness)
+        
+        # Load persistent state (master volume, per-character volumes)
+        self._load_persistent_state()
         
         # Body possession tracking - allows characters to inhabit other mannequins
         # Maps character name -> body name (None = use own body)
@@ -1051,6 +1059,33 @@ class DMXOSCBridge:
                 "mover_speed": 50,  # DMX value for pan/tilt speed
             }
         }
+    
+    def _load_persistent_state(self):
+        """Load persistent state from JSON file (master volume, per-character volumes)."""
+        if STATE_FILE.exists():
+            try:
+                with open(STATE_FILE) as f:
+                    state = json.load(f)
+                self.master_volume = state.get("master_volume", 0.75)
+                self.character_volumes = state.get("character_volumes", {})
+                print(f"📂 Loaded persistent state: master={self.master_volume:.0%}")
+                if self.character_volumes:
+                    print(f"   Character volumes: {self.character_volumes}")
+            except Exception as e:
+                print(f"⚠️  Failed to load persistent state: {e}")
+    
+    def _save_persistent_state(self):
+        """Save persistent state to JSON file."""
+        state = {
+            "master_volume": self.master_volume,
+            "character_volumes": self.character_volumes,
+        }
+        try:
+            with open(STATE_FILE, "w") as f:
+                json.dump(state, f, indent=2)
+            print(f"💾 Saved persistent state")
+        except Exception as e:
+            print(f"⚠️  Failed to save persistent state: {e}")
     
     def _setup_from_config(self):
         """Setup fixtures and clients from config."""
@@ -1290,6 +1325,7 @@ class DMXOSCBridge:
         # Master volume
         elif cmd == "set_master_volume":
             self.master_volume = data["volume"]
+            self._save_persistent_state()
             print(f"🔊 Master volume set to {self.master_volume * 100:.0f}%")
         
         # Broadcast updated state
