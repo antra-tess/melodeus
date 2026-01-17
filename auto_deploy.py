@@ -46,10 +46,16 @@ MELODEUS_FILES = {
     "tools.py",
 }
 
-# Config files to sync (non-sensitive only!)
-# Secrets should stay in local config.yaml, not in the config repo
+# Config files to sync
 CONFIG_FILES = {
     "dmx_config.yaml",
+    "config.yaml",
+}
+
+# Config directories to sync
+CONFIG_DIRS = {
+    "presets",
+    "context_states",
 }
 
 
@@ -95,25 +101,40 @@ def pull_changes(repo_dir: Path):
 
 
 def sync_configs():
-    """Sync config files from config repo to melodeus."""
+    """Sync config files and directories from config repo to melodeus."""
+    import shutil
+
     if not CONFIG_DIR.exists():
         print(f"⚠️  Config directory not found: {CONFIG_DIR}")
         return False
 
     print("⚙️  Syncing config files...")
     synced = []
+
+    # Sync individual files
     for config_file in CONFIG_FILES:
         src = CONFIG_DIR / config_file
         dst = MELODEUS_DIR / config_file
         if src.exists():
-            # Read and write to preserve any local formatting
             content = src.read_text()
             dst.write_text(content)
             synced.append(config_file)
             print(f"   ✓ {config_file}")
 
+    # Sync directories
+    for config_dir in CONFIG_DIRS:
+        src = CONFIG_DIR / config_dir
+        dst = MELODEUS_DIR / config_dir
+        if src.exists() and src.is_dir():
+            # Remove existing and copy fresh
+            if dst.exists():
+                shutil.rmtree(dst)
+            shutil.copytree(src, dst)
+            synced.append(f"{config_dir}/")
+            print(f"   ✓ {config_dir}/")
+
     if synced:
-        print(f"✅ Synced {len(synced)} config files")
+        print(f"✅ Synced {len(synced)} config items")
     return True
 
 
