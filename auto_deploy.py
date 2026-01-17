@@ -2,7 +2,8 @@
 """
 Auto-deploy poller for melodeus.
 
-Polls a webhook relay server for new pushes, pulls changes, and restarts services.
+Polls a webhook relay server for new pushes and manual triggers.
+Handles both code updates (melodeus) and config updates (melodeus-config).
 
 Usage:
     python auto_deploy.py --webhook-url https://your-app.railway.app
@@ -10,6 +11,8 @@ Usage:
 Environment variables:
     WEBHOOK_URL - URL of the webhook relay server
     POLL_INTERVAL - Seconds between polls (default: 2)
+    CONFIG_REPO - Config repo name (default: antra-tess/melodeus-config)
+    CODE_REPO - Code repo name (default: antra-tess/melodeus)
 """
 
 import os
@@ -19,6 +22,14 @@ import argparse
 import subprocess
 import requests
 from pathlib import Path
+
+# Repository configuration
+CODE_REPO = os.environ.get("CODE_REPO", "antra-tess/melodeus")
+CONFIG_REPO = os.environ.get("CONFIG_REPO", "antra-tess/melodeus-config")
+
+# Directories
+MELODEUS_DIR = Path(__file__).parent
+CONFIG_DIR = MELODEUS_DIR.parent / "melodeus-config"
 
 # Files that trigger specific service restarts
 DMX_FILES = {"dmx_osc_bridge.py", "dmx_config.yaml"}
@@ -35,39 +46,45 @@ MELODEUS_FILES = {
     "tools.py",
 }
 
+# Config files to sync (non-sensitive only!)
+# Secrets should stay in local config.yaml, not in the config repo
+CONFIG_FILES = {
+    "dmx_config.yaml",
+}
 
-def get_current_sha():
+
+def get_current_sha(repo_dir: Path):
     """Get current local HEAD SHA."""
     result = subprocess.run(
         ["git", "rev-parse", "HEAD"],
         capture_output=True,
         text=True,
-        cwd=Path(__file__).parent
+        cwd=repo_dir
     )
     return result.stdout.strip() if result.returncode == 0 else None
 
 
-def get_changed_files(old_sha: str, new_sha: str) -> set:
+def get_changed_files(old_sha: str, new_sha: str, repo_dir: Path) -> set:
     """Get files changed between two commits."""
     result = subprocess.run(
         ["git", "diff", "--name-only", old_sha, new_sha],
         capture_output=True,
         text=True,
-        cwd=Path(__file__).parent
+        cwd=repo_dir
     )
     if result.returncode == 0:
         return set(result.stdout.strip().split("\n"))
     return set()
 
 
-def pull_changes():
+def pull_changes(repo_dir: Path):
     """Pull latest changes from origin/main."""
-    print("📥 Pulling changes...")
+    print(f"📥 Pulling changes in {repo_dir.name}...")
     result = subprocess.run(
         ["git", "pull", "origin", "main"],
         capture_output=True,
         text=True,
-        cwd=Path(__file__).parent
+        cwd=repo_dir
     )
     if result.returncode == 0:
         print(result.stdout)
@@ -77,24 +94,39 @@ def pull_changes():
         return False
 
 
+def sync_configs():
+    """Sync config files from config repo to melodeus."""
+    if not CONFIG_DIR.exists():
+        print(f"⚠️  Config directory not found: {CONFIG_DIR}")
+        return False
+
+    print("⚙️  Syncing config files...")
+    synced = []
+    for config_file in CONFIG_FILES:
+        src = CONFIG_DIR / config_file
+        dst = MELODEUS_DIR / config_file
+        if src.exists():
+            # Read and write to preserve any local formatting
+            content = src.read_text()
+            dst.write_text(content)
+            synced.append(config_file)
+            print(f"   ✓ {config_file}")
+
+    if synced:
+        print(f"✅ Synced {len(synced)} config files")
+    return True
+
+
 def restart_service(service_name: str):
-    """Restart a terminal-sessions service via the MCP server."""
-    # We'll use a simple approach: kill and restart via subprocess
-    # This assumes the services are managed by terminal-sessions MCP
+    """Restart a service."""
     print(f"🔄 Restarting {service_name}...")
 
-    # For now, we'll just print - actual restart logic depends on your setup
-    # You could use: subprocess.run(["pkill", "-f", pattern])
-    # Then start the service again
-
     if service_name == "dmx-bridge":
-        # Kill existing
         subprocess.run(["pkill", "-f", "dmx_osc_bridge.py"], capture_output=True)
         time.sleep(1)
-        # Start new (in background)
         subprocess.Popen(
             ["./venv/bin/python", "dmx_osc_bridge.py"],
-            cwd=Path(__file__).parent,
+            cwd=MELODEUS_DIR,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             start_new_session=True
@@ -102,16 +134,13 @@ def restart_service(service_name: str):
         print(f"✅ {service_name} restarted")
 
     elif service_name == "melodeus":
-        # Kill existing
         subprocess.run(["pkill", "-f", "unified_voice_conversation_config.py"], capture_output=True)
         time.sleep(1)
-        # Also kill ports it uses
         subprocess.run("lsof -ti :8795 :11235 | xargs kill -9 2>/dev/null", shell=True, capture_output=True)
         time.sleep(1)
-        # Start new (in background)
         subprocess.Popen(
             ["./venv/bin/python", "unified_voice_conversation_config.py"],
-            cwd=Path(__file__).parent,
+            cwd=MELODEUS_DIR,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             start_new_session=True
@@ -119,43 +148,68 @@ def restart_service(service_name: str):
         print(f"✅ {service_name} restarted")
 
 
-def check_and_deploy(webhook_url: str, last_sha: str) -> str:
-    """Check for updates and deploy if needed. Returns new SHA."""
+def handle_code_update(webhook_url: str, last_sha: str) -> str:
+    """Handle code repository updates. Returns new SHA."""
     try:
-        response = requests.get(f"{webhook_url}/latest", timeout=5)
+        response = requests.get(f"{webhook_url}/latest/{CODE_REPO}", timeout=5)
         response.raise_for_status()
         data = response.json()
     except Exception as e:
-        print(f"⚠️  Failed to poll webhook: {e}")
         return last_sha
 
     remote_sha = data.get("sha")
+    trigger = data.get("trigger")
 
-    if not remote_sha:
-        return last_sha  # No push recorded yet
+    # Check for manual triggers
+    if trigger:
+        action = trigger.get("action")
+        print(f"\n🎯 Manual trigger: {action}")
 
-    if remote_sha == last_sha:
-        return last_sha  # No changes
+        # Acknowledge the trigger
+        try:
+            requests.post(f"{webhook_url}/ack/{CODE_REPO}", timeout=5)
+        except:
+            pass
 
-    print(f"\n🆕 New push detected: {remote_sha[:7]}")
+        if action == "full":
+            pull_changes(MELODEUS_DIR)
+            restart_service("dmx-bridge")
+            restart_service("melodeus")
+            print("✅ Full restart complete!\n")
+            return get_current_sha(MELODEUS_DIR) or last_sha
+
+        elif action == "pull":
+            pull_changes(MELODEUS_DIR)
+            print("✅ Pull complete (no restart)\n")
+            return get_current_sha(MELODEUS_DIR) or last_sha
+
+        elif action == "config":
+            sync_configs()
+            restart_service("melodeus")  # Restart to pick up new configs
+            print("✅ Config sync complete!\n")
+            return last_sha
+
+    # Check for new pushes
+    if not remote_sha or remote_sha == last_sha:
+        return last_sha
+
+    print(f"\n🆕 New code push detected: {remote_sha[:7]}")
     print(f"   Pusher: {data.get('pusher')}")
     print(f"   Ref: {data.get('ref')}")
 
-    # Pull changes
-    old_sha = get_current_sha()
-    if not pull_changes():
+    old_sha = get_current_sha(MELODEUS_DIR)
+    if not pull_changes(MELODEUS_DIR):
         return last_sha
 
-    new_sha = get_current_sha()
+    new_sha = get_current_sha(MELODEUS_DIR)
 
-    # Determine what to restart based on changed files
-    changed = get_changed_files(old_sha, new_sha) if old_sha else set()
+    # Determine what to restart
+    changed = get_changed_files(old_sha, new_sha, MELODEUS_DIR) if old_sha else set()
     print(f"📝 Changed files: {changed}")
 
     restart_dmx = bool(changed & DMX_FILES)
     restart_melodeus = bool(changed & MELODEUS_FILES)
 
-    # If we can't determine, restart both
     if not changed or (not restart_dmx and not restart_melodeus):
         restart_dmx = True
         restart_melodeus = True
@@ -165,7 +219,58 @@ def check_and_deploy(webhook_url: str, last_sha: str) -> str:
     if restart_melodeus:
         restart_service("melodeus")
 
-    print(f"✅ Deploy complete!\n")
+    print(f"✅ Code deploy complete!\n")
+    return new_sha
+
+
+def handle_config_update(webhook_url: str, last_sha: str) -> str:
+    """Handle config repository updates. Returns new SHA."""
+    if not CONFIG_DIR.exists():
+        return last_sha
+
+    try:
+        response = requests.get(f"{webhook_url}/latest/{CONFIG_REPO}", timeout=5)
+        response.raise_for_status()
+        data = response.json()
+    except Exception as e:
+        return last_sha
+
+    remote_sha = data.get("sha")
+    trigger = data.get("trigger")
+
+    # Check for manual config triggers
+    if trigger:
+        action = trigger.get("action")
+        print(f"\n🎯 Config manual trigger: {action}")
+
+        try:
+            requests.post(f"{webhook_url}/ack/{CONFIG_REPO}", timeout=5)
+        except:
+            pass
+
+        pull_changes(CONFIG_DIR)
+        sync_configs()
+        restart_service("melodeus")
+        print("✅ Config update complete!\n")
+        return get_current_sha(CONFIG_DIR) or last_sha
+
+    # Check for new config pushes
+    if not remote_sha or remote_sha == last_sha:
+        return last_sha
+
+    print(f"\n🆕 New config push detected: {remote_sha[:7]}")
+    print(f"   Pusher: {data.get('pusher')}")
+
+    if not pull_changes(CONFIG_DIR):
+        return last_sha
+
+    new_sha = get_current_sha(CONFIG_DIR)
+    sync_configs()
+
+    # Restart melodeus to pick up new configs
+    restart_service("melodeus")
+
+    print(f"✅ Config deploy complete!\n")
     return new_sha
 
 
@@ -191,14 +296,22 @@ def main():
     print(f"🚀 Auto-deploy poller starting")
     print(f"   Webhook URL: {args.webhook_url}")
     print(f"   Poll interval: {args.poll_interval}s")
+    print(f"   Code repo: {CODE_REPO}")
+    print(f"   Config repo: {CONFIG_REPO}")
+    print(f"   Config dir: {CONFIG_DIR}")
     print(f"   Press Ctrl+C to stop\n")
 
-    last_sha = get_current_sha()
-    print(f"📍 Current SHA: {last_sha[:7] if last_sha else 'unknown'}\n")
+    code_sha = get_current_sha(MELODEUS_DIR)
+    config_sha = get_current_sha(CONFIG_DIR) if CONFIG_DIR.exists() else None
+
+    print(f"📍 Code SHA: {code_sha[:7] if code_sha else 'unknown'}")
+    print(f"📍 Config SHA: {config_sha[:7] if config_sha else 'not cloned'}\n")
 
     try:
         while True:
-            last_sha = check_and_deploy(args.webhook_url, last_sha)
+            code_sha = handle_code_update(args.webhook_url, code_sha)
+            if CONFIG_DIR.exists():
+                config_sha = handle_config_update(args.webhook_url, config_sha)
             time.sleep(args.poll_interval)
     except KeyboardInterrupt:
         print("\n👋 Stopping auto-deploy poller")
