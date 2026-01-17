@@ -14,4 +14,6 @@ openai
 anthropic[bedrock]>=0.18.0
 scipy
 python-osc>=1.8.0
+pyartnet>=1.0.0  # Art-Net DMX output for dmx_osc_bridge.py
+aiohttp>=3.8.0  # Web dashboard for dmx_osc_bridge.py
 # speexdsp>=0.1.1  # Optional - requires swig. Use mel-aec (Rust) instead for better AEC
