@@ -101,15 +101,18 @@ def pull_changes(repo_dir: Path):
 
 
 def sync_configs():
-    """Sync config files and directories from config repo to melodeus."""
+    """Sync config files and directories from config repo to melodeus.
+    
+    Returns set of synced file names for determining which services to restart.
+    """
     import shutil
 
     if not CONFIG_DIR.exists():
         print(f"⚠️  Config directory not found: {CONFIG_DIR}")
-        return False
+        return set()
 
     print("⚙️  Syncing config files...")
-    synced = []
+    synced = set()
 
     # Sync individual files
     for config_file in CONFIG_FILES:
@@ -118,7 +121,7 @@ def sync_configs():
         if src.exists():
             content = src.read_text()
             dst.write_text(content)
-            synced.append(config_file)
+            synced.add(config_file)
             print(f"   ✓ {config_file}")
 
     # Sync directories
@@ -130,12 +133,12 @@ def sync_configs():
             if dst.exists():
                 shutil.rmtree(dst)
             shutil.copytree(src, dst)
-            synced.append(f"{config_dir}/")
+            synced.add(f"{config_dir}/")
             print(f"   ✓ {config_dir}/")
 
     if synced:
         print(f"✅ Synced {len(synced)} config items")
-    return True
+    return synced
 
 
 def restart_service(service_name: str):
@@ -205,8 +208,12 @@ def handle_code_update(webhook_url: str, last_sha: str) -> str:
             return get_current_sha(MELODEUS_DIR) or last_sha
 
         elif action == "config":
-            sync_configs()
-            restart_service("melodeus")  # Restart to pick up new configs
+            synced = sync_configs()
+            # Restart services based on what was synced
+            if "dmx_config.yaml" in synced:
+                restart_service("dmx-bridge")
+            if "config.yaml" in synced or "presets/" in synced or "context_states/" in synced:
+                restart_service("melodeus")
             print("✅ Config sync complete!\n")
             return last_sha
 
@@ -270,8 +277,14 @@ def handle_config_update(webhook_url: str, last_sha: str) -> str:
             pass
 
         pull_changes(CONFIG_DIR)
-        sync_configs()
-        restart_service("melodeus")
+        synced = sync_configs()
+        
+        # Restart services based on what was synced
+        if "dmx_config.yaml" in synced:
+            restart_service("dmx-bridge")
+        if "config.yaml" in synced or "presets/" in synced or "context_states/" in synced:
+            restart_service("melodeus")
+        
         print("✅ Config update complete!\n")
         return get_current_sha(CONFIG_DIR) or last_sha
 
@@ -282,14 +295,25 @@ def handle_config_update(webhook_url: str, last_sha: str) -> str:
     print(f"\n🆕 New config push detected: {remote_sha[:7]}")
     print(f"   Pusher: {data.get('pusher')}")
 
+    old_sha = get_current_sha(CONFIG_DIR)
     if not pull_changes(CONFIG_DIR):
         return last_sha
 
     new_sha = get_current_sha(CONFIG_DIR)
-    sync_configs()
+    
+    # Check what changed in config repo
+    changed = get_changed_files(old_sha, new_sha, CONFIG_DIR) if old_sha else set()
+    print(f"📝 Changed config files: {changed}")
+    
+    synced = sync_configs()
 
-    # Restart melodeus to pick up new configs
-    restart_service("melodeus")
+    # Restart services based on what changed
+    if "dmx_config.yaml" in changed or "dmx_config.yaml" in synced:
+        restart_service("dmx-bridge")
+    if any(f in changed for f in ["config.yaml", "presets/", "context_states/"]) or \
+       any(f.startswith("presets/") or f.startswith("context_states/") for f in changed) or \
+       "config.yaml" in synced:
+        restart_service("melodeus")
 
     print(f"✅ Config deploy complete!\n")
     return new_sha
