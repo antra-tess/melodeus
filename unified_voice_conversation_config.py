@@ -1544,8 +1544,12 @@ class UnifiedVoiceConversation:
 
         # Filter tool calls from context - each character only sees tools they have access to
         # This prevents them from getting confused and trying to use tools they don't have
+        # Skip system messages - they contain tool instruction examples that should not be stripped
         allowed_tools = self._get_character_tool_names(character_config)
         for msg in messages:
+            # Don't strip from system messages - they contain tool examples
+            if msg.get("role") == "system":
+                continue
             content = msg.get("content")
             if isinstance(content, str):
                 msg["content"] = self._strip_tool_calls_from_content(content, allowed_tools)
@@ -3899,13 +3903,15 @@ class UnifiedVoiceConversation:
                 if tool_type == 'osc':
                     param_name = tool_config.get('param_name', 'value')
                     param_desc = tool_config.get('param_description', 'The value to send')
-                    parameters = {
-                        param_name: {
-                            'type': 'string',
-                            'description': param_desc,
-                            'required': True
-                        }
+                    param_example = tool_config.get('param_example', '')
+                    param_def = {
+                        'type': 'string',
+                        'description': param_desc,
+                        'required': True
                     }
+                    if param_example:
+                        param_def['example'] = param_example
+                    parameters = {param_name: param_def}
                 else:
                     parameters = {'value': {'type': 'string', 'required': True}}
 

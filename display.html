@@ -225,8 +225,9 @@
 
         .utterance-speaker {
             font-family: 'JetBrains Mono', monospace;
-            font-size: 11px;
-            letter-spacing: 0.2em;
+            font-size: 1.3rem;
+            font-weight: 600;
+            letter-spacing: 0.15em;
             text-transform: uppercase;
             margin-bottom: 12px;
             display: flex;
@@ -623,6 +624,7 @@
         }
 
         function handleTranscription(data) {
+            console.log('🎤 Transcription received:', data);
             const narrative = document.getElementById('narrative');
             hideEmptyState();
 
@@ -642,7 +644,8 @@
                     <div class="utterance-content">${escapeHtml(data.text)}</div>
                 `;
                 narrative.scrollTop = narrative.scrollHeight;
-            } else if (data.is_final) {
+            } else {
+                // Final transcription (or fallback if is_final not set)
                 const interim = document.getElementById('interim-utterance');
                 if (interim) interim.remove();
 
@@ -825,8 +828,8 @@
                 utterance.className = `utterance ${isAI ? 'ai' : 'human'}`;
                 if (turn.message_id) utterance.id = turn.message_id;
                 
-                // Determine speaker name
-                let speaker = turn.speaker || turn.name || (isAI ? 'AI' : 'Human');
+                // Determine speaker name - AI uses 'character', humans use 'speaker_name'
+                let speaker = turn.character || turn.speaker || turn.speaker_name || turn.name || (isAI ? 'AI' : 'Human');
                 
                 utterance.innerHTML = `
                     <div class="utterance-speaker">
