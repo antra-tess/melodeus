@@ -476,6 +476,7 @@ DASHBOARD_HTML = """
             <button class="btn btn-deactivate" onclick="sendCommand('all_full')">☀️ All Full</button>
             <button class="btn btn-deactivate" onclick="sendCommand('x32_refresh')">🔄 Refresh X32</button>
             <button class="btn" style="background: #eab308; color: black;" onclick="sendCommand('stop_all_thinking')">🛑 Stop Thinking</button>
+            <button class="btn" style="background: #22c55e; color: white;" onclick="sendCommand('save_colors')">💾 Save Colors</button>
         </div>
         <div style="margin-top: 20px; padding: 15px; background: var(--bg-card); border-radius: 8px; max-width: 400px;">
             <label style="display: flex; align-items: center; gap: 10px; font-size: 14px;">
@@ -1063,29 +1064,65 @@ class DMXOSCBridge:
         }
     
     def _load_persistent_state(self):
-        """Load persistent state from JSON file (master volume, per-character volumes)."""
+        """Load persistent state from JSON file (master volume, per-character volumes, colors)."""
+        self._saved_character_colors: Dict[str, List[int]] = {}
+        self._saved_house_light_colors: Dict[str, List[int]] = {}
         if STATE_FILE.exists():
             try:
                 with open(STATE_FILE) as f:
                     state = json.load(f)
                 self.master_volume = state.get("master_volume", 0.75)
                 self.character_volumes = state.get("character_volumes", {})
+                self._saved_character_colors = state.get("character_colors", {})
+                self._saved_house_light_colors = state.get("house_light_colors", {})
                 print(f"📂 Loaded persistent state: master={self.master_volume:.0%}")
                 if self.character_volumes:
                     print(f"   Character volumes: {self.character_volumes}")
+                if self._saved_character_colors:
+                    print(f"   Saved colors for: {list(self._saved_character_colors.keys())}")
             except Exception as e:
                 print(f"⚠️  Failed to load persistent state: {e}")
     
+    def _apply_saved_colors(self):
+        """Apply saved colors to fixtures after they're loaded from config."""
+        # Apply character colors
+        for char_name, color in self._saved_character_colors.items():
+            if char_name in self.character_fixtures:
+                fixtures = self.character_fixtures[char_name]
+                if fixtures.par_can:
+                    fixtures.par_can.color = tuple(color)
+                    print(f"   🎨 Restored color for {char_name}")
+        
+        # Apply house light colors
+        for fixture_name, color in self._saved_house_light_colors.items():
+            if fixture_name in self.house_light_state:
+                self.house_light_state[fixture_name]["color"] = color
+                print(f"   🏠 Restored color for {fixture_name}")
+    
     def _save_persistent_state(self):
         """Save persistent state to JSON file."""
+        # Collect current character colors
+        character_colors = {}
+        for char_name, fixtures in self.character_fixtures.items():
+            if fixtures.par_can:
+                character_colors[char_name] = list(fixtures.par_can.color)
+        
+        # Collect house light colors
+        house_light_colors = {}
+        for fixture_name, state in self.house_light_state.items():
+            if "color" in state:
+                house_light_colors[fixture_name] = state["color"]
+        
         state = {
             "master_volume": self.master_volume,
             "character_volumes": self.character_volumes,
+            "character_colors": character_colors,
+            "house_light_colors": house_light_colors,
         }
         try:
             with open(STATE_FILE, "w") as f:
                 json.dump(state, f, indent=2)
-            print(f"💾 Saved persistent state")
+            print(f"💾 Saved persistent state (including colors)")
         except Exception as e:
             print(f"⚠️  Failed to save persistent state: {e}")
     
@@ -1196,6 +1233,9 @@ class DMXOSCBridge:
             movers = len(fix.moving_heads)
             x32 = f"X32 ch{self.character_x32[name].channel}" if name in self.character_x32 else "no X32"
             print(f"   {name}: {par}, {movers} movers, {x32}")
+        
+        # Apply any saved colors from persistent state
+        self._apply_saved_colors()
     
     async def start(self):
         """Start the bridge."""
@@ -1332,6 +1372,10 @@ class DMXOSCBridge:
         # Stop all thinking
         elif cmd == "stop_all_thinking":
             await self._stop_all_thinking()
+        # Save colors
+        elif cmd == "save_colors":
+            self._save_persistent_state()
+            await self._broadcast_event("log", message="Colors saved!", level="event")
         
         # Broadcast updated state
         await self._broadcast_state()
