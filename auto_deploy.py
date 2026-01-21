@@ -171,6 +171,18 @@ def restart_service(service_name: str):
         )
         print(f"✅ {service_name} restarted")
 
+    elif service_name == "frontend":
+        subprocess.run(["pkill", "-f", "http.server 8080"], capture_output=True)
+        time.sleep(1)
+        subprocess.Popen(
+            ["python3", "-m", "http.server", "8080"],
+            cwd=MELODEUS_DIR,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True
+        )
+        print(f"✅ {service_name} restarted")
+
 
 def handle_local_triggers(webhook_url: str) -> bool:
     """Handle _local triggers (quick actions). Returns True if handled."""
@@ -198,6 +210,7 @@ def handle_local_triggers(webhook_url: str) -> bool:
         pull_changes(MELODEUS_DIR)
         restart_service("dmx-bridge")
         restart_service("melodeus")
+        restart_service("frontend")
         print("✅ Full restart complete!\n")
     elif action == "pull":
         pull_changes(MELODEUS_DIR)
@@ -219,6 +232,9 @@ def handle_local_triggers(webhook_url: str) -> bool:
     elif action == "melodeus":
         restart_service("melodeus")
         print("✅ Melodeus restart complete!\n")
+    elif action == "frontend":
+        restart_service("frontend")
+        print("✅ Frontend restart complete!\n")
 
     return True
 
