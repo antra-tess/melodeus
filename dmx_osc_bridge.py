@@ -475,6 +475,7 @@ DASHBOARD_HTML = """
             <button class="btn btn-activate" onclick="sendCommand('all_idle')">🌙 All Idle</button>
             <button class="btn btn-deactivate" onclick="sendCommand('all_full')">☀️ All Full</button>
             <button class="btn btn-deactivate" onclick="sendCommand('x32_refresh')">🔄 Refresh X32</button>
+            <button class="btn" style="background: #eab308; color: black;" onclick="sendCommand('stop_all_thinking')">🛑 Stop Thinking</button>
         </div>
         <div style="margin-top: 20px; padding: 15px; background: var(--bg-card); border-radius: 8px; max-width: 400px;">
             <label style="display: flex; align-items: center; gap: 10px; font-size: 14px;">
@@ -959,6 +960,7 @@ class DMXOSCBridge:
         self.speaking_characters: Set[str] = set()
         self.thinking_characters: Set[str] = set()
         self.pulse_tasks: Dict[str, asyncio.Task] = {}  # Character -> pulse task
+        self.thinking_timeout_tasks: Dict[str, asyncio.Task] = {}  # Character -> timeout task
         self.current_brightness: Dict[str, float] = {}
         self.current_x32_fader: Dict[str, float] = {}
         self.current_x32_muted: Dict[str, bool] = {}
@@ -1327,6 +1329,9 @@ class DMXOSCBridge:
             self.master_volume = data["volume"]
             self._save_persistent_state()
             print(f"🔊 Master volume set to {self.master_volume * 100:.0f}%")
+        # Stop all thinking
+        elif cmd == "stop_all_thinking":
+            await self._stop_all_thinking()
         
         # Broadcast updated state
         await self._broadcast_state()
@@ -1598,6 +1603,14 @@ class DMXOSCBridge:
             except asyncio.CancelledError:
                 pass
         
+        # Cancel any existing timeout task
+        if character_name in self.thinking_timeout_tasks:
+            self.thinking_timeout_tasks[character_name].cancel()
+            try:
+                await self.thinking_timeout_tasks[character_name]
+            except asyncio.CancelledError:
+                pass
+        
         # Get the effective body (either own or possessed)
         effective_body = self._get_effective_body(character_name)
         
@@ -1607,6 +1620,10 @@ class DMXOSCBridge:
         # Start new pulse task for the effective body
         task = asyncio.create_task(self._pulse_character(character_name))
         self.pulse_tasks[character_name] = task
+        
+        # Start timeout task (60 seconds max thinking time)
+        timeout_task = asyncio.create_task(self._thinking_timeout(character_name, 60.0))
+        self.thinking_timeout_tasks[character_name] = timeout_task
         
         # Also raise the X32 bus fader so thinking sound comes from mannequin speaker
         # Use the effective body's X32 channel
@@ -1636,8 +1653,64 @@ class DMXOSCBridge:
                 pass
             del self.pulse_tasks[character_name]
         
+        # Cancel timeout task if exists
+        if character_name in self.thinking_timeout_tasks:
+            self.thinking_timeout_tasks[character_name].cancel()
+            try:
+                await self.thinking_timeout_tasks[character_name]
+            except asyncio.CancelledError:
+                pass
+            del self.thinking_timeout_tasks[character_name]
+        
         await self._broadcast_event("thinking_stop", character=character_name)
         await self._broadcast_state()
+    
+    async def _stop_all_thinking(self):
+        """Stop all thinking states (cancel all pulsing animations)."""
+        print(f"🛑 Stopping all thinking states")
+        
+        # Get list of currently thinking characters
+        thinking_chars = list(self.thinking_characters)
+        
+        # Clear the set first
+        self.thinking_characters.clear()
+        
+        # Cancel all pulse tasks
+        for character_name in thinking_chars:
+            if character_name in self.pulse_tasks:
+                self.pulse_tasks[character_name].cancel()
+                try:
+                    await self.pulse_tasks[character_name]
+                except asyncio.CancelledError:
+                    pass
+            
+            # Cancel timeout tasks
+            if character_name in self.thinking_timeout_tasks:
+                self.thinking_timeout_tasks[character_name].cancel()
+                try:
+                    await self.thinking_timeout_tasks[character_name]
+                except asyncio.CancelledError:
+                    pass
+            
+            await self._broadcast_event("thinking_stop", character=character_name)
+        
+        # Clear task dicts
+        self.pulse_tasks.clear()
+        self.thinking_timeout_tasks.clear()
+        
+        print(f"   ✓ Stopped thinking for: {thinking_chars}")
+        await self._broadcast_state()
+    
+    async def _thinking_timeout(self, character_name: str, timeout_seconds: float = 60.0):
+        """Auto-stop thinking after timeout."""
+        try:
+            await asyncio.sleep(timeout_seconds)
+            if character_name in self.thinking_characters:
+                print(f"⏰ Thinking timeout for {character_name} ({timeout_seconds}s)")
+                self.thinking_characters.discard(character_name)
+                await self._on_thinking_stop_async(character_name)
+        except asyncio.CancelledError:
+            pass  # Normal cancellation when thinking stops normally
     
     def _on_move_body(self, address, character_name, target_body):
         """Handle character moving to another body/mannequin.
