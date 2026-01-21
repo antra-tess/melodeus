@@ -172,6 +172,57 @@ def restart_service(service_name: str):
         print(f"✅ {service_name} restarted")
 
 
+def handle_local_triggers(webhook_url: str) -> bool:
+    """Handle _local triggers (quick actions). Returns True if handled."""
+    try:
+        response = requests.get(f"{webhook_url}/latest/_local", timeout=5)
+        response.raise_for_status()
+        data = response.json()
+    except Exception:
+        return False
+
+    trigger = data.get("trigger")
+    if not trigger:
+        return False
+
+    action = trigger.get("action")
+    print(f"\n🎯 Quick action: {action}")
+
+    # Acknowledge the trigger
+    try:
+        requests.post(f"{webhook_url}/ack/_local", timeout=5)
+    except:
+        pass
+
+    if action == "full":
+        pull_changes(MELODEUS_DIR)
+        restart_service("dmx-bridge")
+        restart_service("melodeus")
+        print("✅ Full restart complete!\n")
+    elif action == "pull":
+        pull_changes(MELODEUS_DIR)
+        if CONFIG_DIR.exists():
+            pull_changes(CONFIG_DIR)
+        print("✅ Pull complete!\n")
+    elif action == "config":
+        if CONFIG_DIR.exists():
+            pull_changes(CONFIG_DIR)
+        synced = sync_configs()
+        if "dmx_config.yaml" in synced:
+            restart_service("dmx-bridge")
+        if "config.yaml" in synced or "presets/" in synced or "context_states/" in synced:
+            restart_service("melodeus")
+        print("✅ Config sync complete!\n")
+    elif action == "dmx":
+        restart_service("dmx-bridge")
+        print("✅ DMX restart complete!\n")
+    elif action == "melodeus":
+        restart_service("melodeus")
+        print("✅ Melodeus restart complete!\n")
+
+    return True
+
+
 def handle_code_update(webhook_url: str, last_sha: str) -> str:
     """Handle code repository updates. Returns new SHA."""
     try:
@@ -221,9 +272,15 @@ def handle_code_update(webhook_url: str, last_sha: str) -> str:
     if not remote_sha or remote_sha == last_sha:
         return last_sha
 
+    # Skip tag pushes - they don't change HEAD and cause infinite loops
+    ref = data.get('ref', '')
+    if ref.startswith('refs/tags/'):
+        print(f"\n📌 Tag push: {ref} - skipping restart")
+        return remote_sha  # Mark as handled
+
     print(f"\n🆕 New code push detected: {remote_sha[:7]}")
     print(f"   Pusher: {data.get('pusher')}")
-    print(f"   Ref: {data.get('ref')}")
+    print(f"   Ref: {ref}")
 
     old_sha = get_current_sha(MELODEUS_DIR)
     if not pull_changes(MELODEUS_DIR):
@@ -354,6 +411,7 @@ def main():
 
     try:
         while True:
+            handle_local_triggers(args.webhook_url)
             code_sha = handle_code_update(args.webhook_url, code_sha)
             if CONFIG_DIR.exists():
                 config_sha = handle_config_update(args.webhook_url, config_sha)
