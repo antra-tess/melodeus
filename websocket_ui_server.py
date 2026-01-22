@@ -747,6 +747,16 @@ class VoiceUIServer:
                 "timestamp": time.time()
             }
         ))
+    
+    async def broadcast_audio_levels(self, input_level: float = 0.0, output_level: float = 0.0):
+        """Broadcast audio input/output levels for UI meters."""
+        await self.broadcast(UIMessage(
+            type="audio_levels",
+            data={
+                "input": input_level,
+                "output": output_level
+            }
+        ))
         
     async def broadcast_conversation_update(self, turn_data: Dict[str, Any]):
         """Broadcast conversation history update."""

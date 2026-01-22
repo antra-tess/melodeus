@@ -146,6 +146,44 @@
             height: 4px;
             cursor: pointer;
         }
+        
+        /* Audio level meters */
+        .level-meter-row {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 4px 0;
+        }
+        
+        .level-label {
+            font-size: 10px;
+            color: #888;
+            width: 40px;
+        }
+        
+        .level-meter {
+            flex: 1;
+            height: 8px;
+            background: #1a1a2e;
+            border-radius: 4px;
+            overflow: hidden;
+            border: 1px solid #0f3460;
+        }
+        
+        .level-bar {
+            height: 100%;
+            width: 0%;
+            transition: width 0.05s ease-out;
+            border-radius: 3px;
+        }
+        
+        .level-bar.input-level {
+            background: linear-gradient(90deg, #4CAF50 0%, #8BC34A 50%, #CDDC39 75%, #FFC107 90%, #f44336 100%);
+        }
+        
+        .level-bar.output-level {
+            background: linear-gradient(90deg, #2196F3 0%, #03A9F4 50%, #00BCD4 75%, #009688 100%);
+        }
 
         .toggle-switch {
             width: 32px;
@@ -591,6 +629,22 @@
                 </div>
     </div>
     
+            <div class="sidebar-section">
+                <h3>Audio Levels</h3>
+                <div class="level-meter-row">
+                    <span class="level-label">🎤 In</span>
+                    <div class="level-meter">
+                        <div class="level-bar input-level" id="input-level-bar"></div>
+                    </div>
+                </div>
+                <div class="level-meter-row">
+                    <span class="level-label">🔊 Out</span>
+                    <div class="level-meter">
+                        <div class="level-bar output-level" id="output-level-bar"></div>
+                    </div>
+                </div>
+            </div>
+    
             <div class="sidebar-section" id="learned-speakers-section" style="display: none;">
                 <h3>Learned Speakers</h3>
                 <div class="learned-speakers-list" id="learned-speakers-list">
@@ -754,6 +808,9 @@
                 case 'mute_while_speaking_changed':
                     muteWhileSpeaking = msg.data.enabled;
                     updateMuteWhileSpeakingToggle();
+                    break;
+                case 'audio_levels':
+                    updateAudioLevels(msg.data);
                     break;
                 case 'contexts_list':
                     console.log('🔍 WebSocket received contexts_list message:', msg);
@@ -1029,6 +1086,17 @@
             }
             if (data.current_generation !== undefined) {
                 document.getElementById('generation-count').textContent = data.current_generation;
+            }
+        }
+        
+        function updateAudioLevels(data) {
+            const inputBar = document.getElementById('input-level-bar');
+            const outputBar = document.getElementById('output-level-bar');
+            if (inputBar && data.input !== undefined) {
+                inputBar.style.width = (data.input * 100) + '%';
+            }
+            if (outputBar && data.output !== undefined) {
+                outputBar.style.width = (data.output * 100) + '%';
             }
         }
         

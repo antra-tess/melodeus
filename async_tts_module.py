@@ -17,7 +17,7 @@ from collections import defaultdict
 import threading
 import traceback
 import queue
-from typing import Optional, AsyncGenerator, Dict, Any, List, Tuple, Any
+from typing import Optional, AsyncGenerator, Dict, Any, List, Tuple, Callable
 from dataclasses import dataclass, field
 import numpy as np
 import scipy.io.wavfile as wavfile
@@ -168,6 +168,9 @@ class AsyncTTSStreamer:
         self.generated_text = ""
         self._archive_audio_buffer = []  # Accumulates audio for archiving
         self._current_message_id = None
+        
+        # Audio level metering callback (for UI visualization)
+        self.output_level_callback: Optional[Callable[[float], None]] = None
 
     def _save_audio_archive(self, audio_data: np.ndarray, message_id: str):
         """Save audio to archive directory as WAV file."""
@@ -501,6 +504,13 @@ class AsyncTTSStreamer:
                 
                 # Send OSC message
                 osc_client.send_message("/character/amplitude", [character_name, float(amplitude)])
+                
+                # Also send to UI level callback if registered
+                if self.output_level_callback:
+                    try:
+                        self.output_level_callback(amplitude)
+                    except Exception:
+                        pass
                 
         except asyncio.CancelledError:
             pass  # Task cancelled, stop sending

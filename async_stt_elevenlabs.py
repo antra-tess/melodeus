@@ -74,6 +74,10 @@ class AsyncSTTElevenLabs:
             event_type: [] for event_type in STTEventType
         }
         
+        # Audio level metering callback (for UI visualization)
+        self.input_level_callback: Optional[Callable[[float], None]] = None
+        self._level_update_counter = 0  # Throttle level updates
+        
         # TitaNet voice fingerprinting (optional)
         self.voice_fingerprinter = None
         if config.enable_speaker_id and TITANET_AVAILABLE:
@@ -363,15 +367,28 @@ class AsyncSTTElevenLabs:
                 # Prepare PCM audio
                 pcm_bytes = prepare_capture_chunk(audio_data, self.config.sample_rate)
                 
+                # Convert to float for processing
+                audio_np = np.frombuffer(pcm_bytes, dtype=np.int16).astype(np.float32) / 32768.0
+                
+                # Calculate input level for UI metering (throttled to ~30 updates/sec)
+                self._level_update_counter += 1
+                if self.input_level_callback and self._level_update_counter >= 10:
+                    self._level_update_counter = 0
+                    rms = np.sqrt(np.mean(audio_np ** 2))
+                    level = min(1.0, rms / 0.15)  # Normalize to 0-1
+                    try:
+                        self.input_level_callback(level)
+                    except Exception:
+                        pass  # Don't let callback errors affect STT
+                
                 # Feed to TitaNet if enabled
                 if self.voice_fingerprinter is not None:
-                    audio_np = np.frombuffer(pcm_bytes, dtype=np.int16).astype(np.float32) / 32768.0
                     self.voice_fingerprinter.add_audio_chunk(
                         audio_np,
                         self.num_audio_frames_received,
                         self.config.sample_rate,
                     )
-                    self.num_audio_frames_received += len(audio_np)
+                self.num_audio_frames_received += len(audio_np)
                 
                 # Update audio window
                 self.audio_window_end = self.num_audio_frames_received

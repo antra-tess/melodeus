@@ -1302,6 +1302,57 @@ class UnifiedVoiceConversation:
         
         # Handle errors
         self.stt.on(STTEventType.ERROR, self._on_error)
+        
+        # Set up audio level metering for UI
+        self._setup_audio_level_metering()
+
+    def _setup_audio_level_metering(self):
+        """Set up audio level callbacks for UI visualization."""
+        # Track current levels
+        self._current_input_level = 0.0
+        self._current_output_level = 0.0
+        
+        # Input level callback from STT
+        def on_input_level(level: float):
+            self._current_input_level = level
+            # Broadcast to UI (throttled in STT module)
+            if hasattr(self, 'ui_server') and self.ui_server:
+                import asyncio
+                try:
+                    loop = asyncio.get_event_loop()
+                    if loop.is_running():
+                        loop.create_task(self.ui_server.broadcast_audio_levels(
+                            input_level=level,
+                            output_level=self._current_output_level
+                        ))
+                except Exception:
+                    pass
+        
+        # Register with STT
+        if hasattr(self.stt, 'input_level_callback'):
+            self.stt.input_level_callback = on_input_level
+        
+        # Output level callback from TTS
+        def on_output_level(level: float):
+            self._current_output_level = level
+            # Broadcast to UI
+            if hasattr(self, 'ui_server') and self.ui_server:
+                import asyncio
+                try:
+                    loop = asyncio.get_event_loop()
+                    if loop.is_running():
+                        loop.create_task(self.ui_server.broadcast_audio_levels(
+                            input_level=self._current_input_level,
+                            output_level=level
+                        ))
+                except Exception:
+                    pass
+        
+        # Register with TTS
+        if hasattr(self.tts, 'output_level_callback'):
+            self.tts.output_level_callback = on_output_level
+        
+        print("🎚️ Audio level metering connected to UI")
 
     def _setup_fingerprinter_callback(self):
         """Set up callback for fingerprinter to notify UI when speakers change."""
