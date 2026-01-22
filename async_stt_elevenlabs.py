@@ -421,11 +421,19 @@ class AsyncSTTElevenLabs:
                 # Convert to float for processing
                 audio_np = np.frombuffer(pcm_bytes, dtype=np.int16).astype(np.float32) / 32768.0
                 
-                # Apply noise gate if enabled
+                # Feed to TitaNet BEFORE gate (need full signal for speaker identification)
+                if self.voice_fingerprinter is not None:
+                    self.voice_fingerprinter.add_audio_chunk(
+                        audio_np,
+                        self.num_audio_frames_received,
+                        self.config.sample_rate,  # Audio is resampled to this rate
+                    )
+                
+                # Apply noise gate if enabled (after TitaNet gets the clean signal)
                 if self.noise_gate is not None:
                     audio_np = self.noise_gate.process(audio_np)
                 
-                # Calculate input level for UI metering (throttled to ~30 updates/sec)
+                # Calculate input level for UI metering (post-gate, throttled to ~30 updates/sec)
                 self._level_update_counter += 1
                 if self.input_level_callback and self._level_update_counter >= 10:
                     self._level_update_counter = 0
@@ -435,15 +443,6 @@ class AsyncSTTElevenLabs:
                         self.input_level_callback(level)
                     except Exception:
                         pass  # Don't let callback errors affect STT
-                
-                # Feed to TitaNet if enabled
-                # Note: audio_np is already resampled to config.sample_rate by prepare_capture_chunk
-                if self.voice_fingerprinter is not None:
-                    self.voice_fingerprinter.add_audio_chunk(
-                        audio_np,
-                        self.num_audio_frames_received,
-                        self.config.sample_rate,  # Audio is resampled to this rate
-                    )
                 self.num_audio_frames_received += len(audio_np)
                 
                 # Update audio window
