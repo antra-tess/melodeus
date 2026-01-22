@@ -37,6 +37,7 @@ class STTEventType(Enum):
     SPEECH_STARTED = "speech_started"
     SPEECH_ENDED = "speech_ended"
     SPEAKER_CHANGE = "speaker_change"
+    SPEAKER_CORRECTION = "speaker_correction"  # Batch diarization corrected a speaker label
     CONNECTION_OPENED = "connection_opened"
     CONNECTION_CLOSED = "connection_closed"
     ERROR = "error"
@@ -86,6 +87,9 @@ class STTConfig:
     # Noise gate configuration (optional)
     # Dict with: threshold_db, attack_ms, hold_ms, release_ms, range_db, enabled, type ('hard'/'expansion')
     gate_config: Optional[Dict[str, Any]] = None
+    # Batch diarization configuration (optional) - uses Scribe v2 batch for proper speaker turns
+    # Dict with: enabled, buffer_duration_sec, min_buffer_sec
+    batch_diarization: Optional[Dict[str, Any]] = None
 
 class AsyncSTTStreamer:
     """Async STT Streamer with callback support."""

@@ -389,6 +389,9 @@ class ConfigLoader:
         # Parse gate config if provided
         gate_config = stt_config_data.get('gate', None)
         
+        # Parse batch diarization config if provided
+        batch_diarization = stt_config_data.get('batch_diarization', None)
+        
         stt_config = STTConfig(
             api_key=stt_api_key,
             model=stt_config_data.get('model', 'nova-3'),
@@ -409,7 +412,8 @@ class ConfigLoader:
             keywords=keywords,
             debug_speaker_data=stt_config_data.get('debug_speaker_data', False),
             save_user_audio=stt_config_data.get('save_user_audio', False),
-            gate_config=gate_config
+            gate_config=gate_config,
+            batch_diarization=batch_diarization
         )
         
         # Create TTS configuration

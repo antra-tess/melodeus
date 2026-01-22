@@ -40,6 +40,13 @@ try:
 except ImportError:
     GATE_AVAILABLE = False
 
+# Try to import batch diarization
+try:
+    from batch_diarization import DiarizationManager, RealtimeTranscript
+    BATCH_DIARIZATION_AVAILABLE = True
+except ImportError:
+    BATCH_DIARIZATION_AVAILABLE = False
+
 
 class AsyncSTTElevenLabs:
     """Async STT Streamer using ElevenLabs Scribe API with same interface as Deepgram module."""
@@ -112,6 +119,22 @@ class AsyncSTTElevenLabs:
                       f"release={gate_config.get('release_ms', 50)}ms")
             except Exception as e:
                 print(f"⚠️  Noise gate failed to initialize: {e}")
+        
+        # Batch diarization (optional) - uses Scribe v2 batch API for proper diarization
+        self.diarization_manager = None
+        batch_diarization_config = getattr(config, 'batch_diarization', None)
+        if batch_diarization_config and BATCH_DIARIZATION_AVAILABLE:
+            try:
+                self.diarization_manager = DiarizationManager(
+                    api_key=config.api_key,
+                    sample_rate=config.sample_rate,
+                    voice_fingerprinter=self.voice_fingerprinter,
+                    speakers_config=speakers_config
+                )
+                self.diarization_manager.on_transcript_update = self._on_diarization_update
+                print(f"🔄 Batch diarization enabled (Scribe v2)")
+            except Exception as e:
+                print(f"⚠️  Batch diarization failed to initialize: {e}")
     
     def on(self, event_type: STTEventType, callback: Callable):
         """Register a callback for an event type."""
@@ -136,6 +159,25 @@ class AsyncSTTElevenLabs:
                 except Exception as e:
                     print(f"⚠️  Callback error for {event_type}: {e}")
                     traceback.print_exc()
+    
+    async def _on_diarization_update(self, message_ids: List[str], corrected_speaker: str, text: str):
+        """
+        Called when batch diarization completes and we have corrected speaker labels.
+        
+        This allows us to update previously-emitted transcripts with better speaker info.
+        """
+        if not message_ids:
+            return
+        
+        print(f"🔄 Diarization update: {corrected_speaker} said \"{text[:50]}...\"")
+        
+        # Emit a speaker correction event that the conversation system can use
+        correction_data = {
+            "message_ids": message_ids,
+            "corrected_speaker": corrected_speaker,
+            "text": text
+        }
+        await self._emit_event(STTEventType.SPEAKER_CORRECTION, correction_data)
     
     def _build_ws_url(self) -> str:
         """Build WebSocket URL with query parameters."""
@@ -383,6 +425,16 @@ class AsyncSTTElevenLabs:
         )
         
         await self._emit_event(STTEventType.UTTERANCE_COMPLETE, stt_result)
+        
+        # Feed transcript to batch diarization for later correction
+        if self.diarization_manager and not is_edit:
+            self.diarization_manager.feed_transcript(
+                text=text,
+                frame_start=self.audio_window_start,
+                frame_end=self.audio_window_end,
+                speaker_guess=user_tag,
+                message_id=message_uuid
+            )
     
     def _reset_turn_state(self):
         """Reset state for a new turn."""
@@ -428,6 +480,15 @@ class AsyncSTTElevenLabs:
                         self.num_audio_frames_received,
                         self.config.sample_rate,  # Audio is resampled to this rate
                     )
+                
+                # Feed to batch diarization BEFORE gate (need clean audio)
+                if self.diarization_manager is not None:
+                    frame_start = self.num_audio_frames_received
+                    frame_end = frame_start + len(audio_np)
+                    self.diarization_manager.feed_audio(audio_np.copy(), frame_start, frame_end)
+                    # Periodically check if we should run batch diarization
+                    if self._level_update_counter == 0:  # Throttle to match level updates
+                        await self.diarization_manager.check_and_process()
                 
                 # Apply noise gate if enabled (after TitaNet gets the clean signal)
                 if self.noise_gate is not None:
