@@ -1572,6 +1572,7 @@ class DMXOSCBridge:
         dispatcher.map("/character/thinking/stop", self._on_thinking_stop)
         dispatcher.map("/character/narrator/start", self._on_narrator_start)
         dispatcher.map("/character/narrator/stop", self._on_narrator_stop)
+        dispatcher.map("/character/amplitude", self._on_amplitude)
         dispatcher.map("/character/move_body", self._on_move_body)
         dispatcher.map("/avatar/color", self._on_avatar_color)
         dispatcher.map("/test", self._on_test)
@@ -1807,6 +1808,46 @@ class DMXOSCBridge:
             print(f"   🎨 Applied normal color to {effective_body}")
         
         await self._broadcast_state()
+    
+    def _on_amplitude(self, address, character_name, amplitude):
+        """Handle real-time audio amplitude for reactive lighting.
+        
+        Args:
+            character_name: The speaking character
+            amplitude: Normalized amplitude 0.0-1.0
+        """
+        # Only modulate if character is currently speaking
+        if character_name not in self.speaking_characters:
+            return
+        
+        # Clamp amplitude
+        amplitude = max(0.0, min(1.0, float(amplitude)))
+        
+        # Schedule async update (don't await to avoid blocking OSC)
+        asyncio.create_task(self._set_amplitude_brightness(character_name, amplitude))
+    
+    async def _set_amplitude_brightness(self, character_name: str, amplitude: float):
+        """Set brightness based on audio amplitude."""
+        effective_body = self._get_effective_body(character_name)
+        if effective_body not in self.character_fixtures:
+            return
+        
+        fixtures = self.character_fixtures[effective_body]
+        if not fixtures.par_can:
+            return
+        
+        # Map amplitude to brightness range
+        # Minimum brightness when speaking (so light doesn't go dark during pauses)
+        min_brightness = 0.3
+        max_brightness = fixtures.par_can.active_brightness
+        
+        # Apply curve for more dramatic effect (amplitude^0.7 makes quieter sounds more visible)
+        curved_amplitude = amplitude ** 0.7
+        brightness = min_brightness + (curved_amplitude * (max_brightness - min_brightness))
+        
+        # Update brightness (this will use narrator/character color automatically)
+        self.current_brightness[effective_body] = brightness
+        await self._set_par_brightness_for_character(effective_body, brightness)
     
     async def _set_par_color_and_brightness(self, character: str, color: Tuple[int, ...], brightness: float):
         """Set both color and brightness for a character's par can."""

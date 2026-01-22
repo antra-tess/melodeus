@@ -247,13 +247,14 @@ class AsyncTTSStreamer:
             print("Error in osc emit")
 
 
-    async def _speak_text_helper(self, text_generator: AsyncGenerator[str, None], first_audio_callback, osc_client, osc_client_address, progress_callback=None) -> bool:
+    async def _speak_text_helper(self, text_generator: AsyncGenerator[str, None], first_audio_callback, osc_client, osc_client_address, progress_callback=None, character_name: Optional[str] = None) -> bool:
         """
         Speak the given text (task that can be canceled)
         
         Args:
             text_generator: yields text to convert to speech
             progress_callback: async callback(spoken_text, char_index) called as TTS progresses
+            character_name: optional character name for amplitude OSC messages
             
         Returns:
             bool: True if completed successfully, False if interrupted
@@ -312,6 +313,13 @@ class AsyncTTSStreamer:
                     current_time = time.time()
                     buffered_duration = audio_stream.get_buffered_duration()
                     audio_stream.write(concat_data)
+                    
+                    # Send amplitude OSC messages for reactive lighting
+                    if osc_client and character_name:
+                        asyncio.create_task(self._send_amplitude_osc(
+                            osc_client, character_name, concat_data, 
+                            current_time + buffered_duration, shared_sample_rate()
+                        ))
                     play_start_time = current_time + buffered_duration
                     for buffer_len, alignment in segment_alignments:
                         if alignment is not None: # sometimes we get no alignments but still audio data
@@ -468,7 +476,38 @@ class AsyncTTSStreamer:
         #print(self.generated_text)
         return trimmed_end(self.generated_text, played_text)
 
-    async def speak_text(self, text_generator: AsyncGenerator[str, None], first_audio_callback, osc_client, osc_client_address, message_id: Optional[str] = None, progress_callback=None):
+    async def _send_amplitude_osc(self, osc_client, character_name: str, audio_data: np.ndarray, play_start_time: float, sample_rate: int):
+        """Send amplitude OSC messages timed to audio playback.
+        
+        Breaks audio into ~30ms chunks and sends amplitude values at the right time.
+        """
+        chunk_duration = 0.03  # 30ms chunks for ~33 updates/sec
+        chunk_samples = int(sample_rate * chunk_duration)
+        
+        try:
+            for i in range(0, len(audio_data), chunk_samples):
+                chunk = audio_data[i:i + chunk_samples]
+                
+                # Calculate RMS amplitude
+                rms = np.sqrt(np.mean(chunk.astype(np.float32) ** 2))
+                # Normalize to 0-1 range (adjust 0.3 based on typical TTS loudness)
+                amplitude = min(1.0, rms / 0.3)
+                
+                # Wait until it's time to send this chunk's amplitude
+                chunk_play_time = play_start_time + (i / sample_rate)
+                wait_time = chunk_play_time - time.time()
+                if wait_time > 0:
+                    await asyncio.sleep(wait_time)
+                
+                # Send OSC message
+                osc_client.send_message("/character/amplitude", [character_name, float(amplitude)])
+                
+        except asyncio.CancelledError:
+            pass  # Task cancelled, stop sending
+        except Exception as e:
+            print(f"⚠️ Amplitude OSC error: {e}")
+    
+    async def speak_text(self, text_generator: AsyncGenerator[str, None], first_audio_callback, osc_client, osc_client_address, message_id: Optional[str] = None, progress_callback=None, character_name: Optional[str] = None):
         # interrupt (if already running)
         await self.interrupt()
 
@@ -476,7 +515,7 @@ class AsyncTTSStreamer:
         self._current_message_id = message_id
 
         # start the task (this way it's cancellable and we don't need to spam checks)
-        self.speak_task = asyncio.create_task(self._speak_text_helper(text_generator, first_audio_callback, osc_client, osc_client_address, progress_callback))
+        self.speak_task = asyncio.create_task(self._speak_text_helper(text_generator, first_audio_callback, osc_client, osc_client_address, progress_callback, character_name))
 
         # wait for it to finish
         result = await self.speak_task

@@ -1691,7 +1691,8 @@ class UnifiedVoiceConversation:
                 self.osc_client,
                 self.config.osc.speaking_start_address,
                 pending_message_id,
-                progress_callback=tts_progress_callback
+                progress_callback=tts_progress_callback,
+                character_name=next_speaker
             )
             self.speak_text_task = asyncio.create_task(speak_text)
             print("waiting for speak text")
@@ -2738,7 +2739,8 @@ class UnifiedVoiceConversation:
                             self.osc_client,
                             self.config.osc.speaking_start_address,
                             pending_message_id,
-                            progress_callback=tts_progress_callback
+                            progress_callback=tts_progress_callback,
+                            character_name=character_config.name
                         )
                     )
                     
@@ -2797,7 +2799,8 @@ class UnifiedVoiceConversation:
                             self.osc_client,
                             self.config.osc.speaking_start_address,
                             pending_message_id,
-                            progress_callback=tts_progress_callback_openai
+                            progress_callback=tts_progress_callback_openai,
+                            character_name=character_config.name
                         )
                     )
                     
@@ -2857,7 +2860,8 @@ class UnifiedVoiceConversation:
                             self.osc_client,
                             self.config.osc.speaking_start_address,
                             pending_message_id,
-                            progress_callback=tts_progress_callback_anthropic
+                            progress_callback=tts_progress_callback_anthropic,
+                            character_name=character_config.name
                         )
                     )
                     
@@ -2922,7 +2926,8 @@ class UnifiedVoiceConversation:
                             self.osc_client,
                             self.config.osc.speaking_start_address,
                             pending_message_id,
-                            progress_callback=tts_progress_callback_bedrock
+                            progress_callback=tts_progress_callback_bedrock,
+                            character_name=character_config.name
                         )
                     )
                     
