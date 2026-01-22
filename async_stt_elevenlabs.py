@@ -18,7 +18,7 @@ from datetime import datetime
 import websockets
 import numpy as np
 
-from mel_aec_audio import ensure_stream_started, prepare_capture_chunk
+from mel_aec_audio import ensure_stream_started, prepare_capture_chunk, shared_sample_rate
 
 # Import shared types from the main STT module
 from async_stt_module import STTEventType, STTResult, STTConfig
@@ -293,11 +293,15 @@ class AsyncSTTElevenLabs:
                     end_time=self.audio_window_end,
                     confidence=1.0
                 )
+                # Use actual audio sample rate (48kHz from mel_aec), not config sample rate (16kHz)
+                actual_sample_rate = shared_sample_rate()
                 user_tag = self.voice_fingerprinter.process_transcript_words(
                     word_timings=[word_timing],
-                    sample_rate=self.config.sample_rate
+                    sample_rate=actual_sample_rate
                 )
         elif self.voice_fingerprinter:
+            # Use actual audio sample rate for TitaNet
+            actual_sample_rate = shared_sample_rate()
             word_timing = WordTiming(
                 word=text,
                 speaker_id="speaker_0",
@@ -307,7 +311,7 @@ class AsyncSTTElevenLabs:
             )
             user_tag = self.voice_fingerprinter.process_transcript_words(
                 word_timings=[word_timing],
-                sample_rate=self.config.sample_rate
+                sample_rate=actual_sample_rate
             )
         
         # Generate or reuse message ID
@@ -381,12 +385,12 @@ class AsyncSTTElevenLabs:
                     except Exception:
                         pass  # Don't let callback errors affect STT
                 
-                # Feed to TitaNet if enabled
+                # Feed to TitaNet if enabled (use actual sample rate, not config)
                 if self.voice_fingerprinter is not None:
                     self.voice_fingerprinter.add_audio_chunk(
                         audio_np,
                         self.num_audio_frames_received,
-                        self.config.sample_rate,
+                        shared_sample_rate(),  # 48kHz from mel_aec, not 16kHz from config
                     )
                 self.num_audio_frames_received += len(audio_np)
                 
