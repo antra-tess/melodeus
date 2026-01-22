@@ -386,6 +386,9 @@ class ConfigLoader:
         stt_provider = stt_config_data.get('provider', 'deepgram')
         stt_api_key = api_keys['elevenlabs'] if stt_provider == 'elevenlabs' else api_keys['deepgram']
 
+        # Parse gate config if provided
+        gate_config = stt_config_data.get('gate', None)
+        
         stt_config = STTConfig(
             api_key=stt_api_key,
             model=stt_config_data.get('model', 'nova-3'),
@@ -405,7 +408,8 @@ class ConfigLoader:
             speaker_profiles_path=stt_config_data.get('speaker_profiles_path'),
             keywords=keywords,
             debug_speaker_data=stt_config_data.get('debug_speaker_data', False),
-            save_user_audio=stt_config_data.get('save_user_audio', False)
+            save_user_audio=stt_config_data.get('save_user_audio', False),
+            gate_config=gate_config
         )
         
         # Create TTS configuration

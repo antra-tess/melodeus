@@ -83,6 +83,9 @@ class STTConfig:
     # Debug settings
     debug_speaker_data: bool = False  # Enable detailed speaker/timing debug output
     save_user_audio: bool = False  # Save recognized user speech segments (async, non-blocking)
+    # Noise gate configuration (optional)
+    # Dict with: threshold_db, attack_ms, hold_ms, release_ms, range_db, enabled, type ('hard'/'expansion')
+    gate_config: Optional[Dict[str, Any]] = None
 
 class AsyncSTTStreamer:
     """Async STT Streamer with callback support."""

@@ -33,6 +33,13 @@ try:
 except ImportError:
     TITANET_AVAILABLE = False
 
+# Try to import noise gate
+try:
+    from audio_gate import NoiseGate, GateConfig, create_gate_from_config
+    GATE_AVAILABLE = True
+except ImportError:
+    GATE_AVAILABLE = False
+
 
 class AsyncSTTElevenLabs:
     """Async STT Streamer using ElevenLabs Scribe API with same interface as Deepgram module."""
@@ -92,6 +99,19 @@ class AsyncSTTElevenLabs:
                 print(f"🤖 TitaNet voice fingerprinting enabled (ElevenLabs STT)")
             except Exception as e:
                 print(f"⚠️  TitaNet voice fingerprinting failed to initialize: {e}")
+        
+        # Noise gate (optional) - configured via gate_config in STTConfig
+        self.noise_gate = None
+        gate_config = getattr(config, 'gate_config', None)
+        if gate_config and GATE_AVAILABLE:
+            try:
+                self.noise_gate = create_gate_from_config(gate_config, config.sample_rate)
+                print(f"🚪 Noise gate enabled: threshold={gate_config.get('threshold_db', -40)}dB, "
+                      f"attack={gate_config.get('attack_ms', 1)}ms, "
+                      f"hold={gate_config.get('hold_ms', 100)}ms, "
+                      f"release={gate_config.get('release_ms', 50)}ms")
+            except Exception as e:
+                print(f"⚠️  Noise gate failed to initialize: {e}")
     
     def on(self, event_type: STTEventType, callback: Callable):
         """Register a callback for an event type."""
@@ -397,6 +417,10 @@ class AsyncSTTElevenLabs:
                 # Convert to float for processing
                 audio_np = np.frombuffer(pcm_bytes, dtype=np.int16).astype(np.float32) / 32768.0
                 
+                # Apply noise gate if enabled
+                if self.noise_gate is not None:
+                    audio_np = self.noise_gate.process(audio_np)
+                
                 # Calculate input level for UI metering (throttled to ~30 updates/sec)
                 self._level_update_counter += 1
                 if self.input_level_callback and self._level_update_counter >= 10:
@@ -421,8 +445,11 @@ class AsyncSTTElevenLabs:
                 # Update audio window
                 self.audio_window_end = self.num_audio_frames_received
                 
+                # Convert back to PCM bytes (after gate processing)
+                gated_pcm = (audio_np * 32768.0).astype(np.int16).tobytes()
+                
                 # Encode audio as base64 for ElevenLabs
-                audio_b64 = base64.b64encode(pcm_bytes).decode('utf-8')
+                audio_b64 = base64.b64encode(gated_pcm).decode('utf-8')
                 
                 # Send to ElevenLabs
                 message = {
