@@ -488,6 +488,19 @@ DASHBOARD_HTML = """
                    oninput="document.getElementById('master-vol-val').textContent = this.value + '%'"
                    onchange="setMasterVolume(this.value / 100)">
         </div>
+        <div style="margin-top: 15px; padding: 15px; background: var(--bg-card); border-radius: 8px; max-width: 400px;">
+            <label style="display: flex; align-items: center; gap: 10px; font-size: 14px;">
+                <span>💡 Amplitude Fade:</span>
+                <span id="amp-fade-val" style="min-width: 45px; text-align: right;">0ms</span>
+            </label>
+            <input type="range" id="amp-fade-slider" min="0" max="100" value="0" style="width: 100%; margin-top: 8px;"
+                   oninput="document.getElementById('amp-fade-val').textContent = this.value + 'ms'"
+                   onchange="setAmplitudeFade(parseInt(this.value))">
+            <div style="display: flex; justify-content: space-between; font-size: 10px; color: var(--text-muted); margin-top: 4px;">
+                <span>Instant</span>
+                <span>Smooth</span>
+            </div>
+        </div>
     </div>
     
     <!-- House Lights Section -->
@@ -558,6 +571,15 @@ DASHBOARD_HTML = """
                         if (slider && val) {
                             slider.value = Math.round(msg.data.master_volume * 100);
                             val.textContent = slider.value + '%';
+                        }
+                    }
+                    // Update amplitude fade slider
+                    if (msg.data.amplitude_fade_ms !== undefined) {
+                        const slider = document.getElementById('amp-fade-slider');
+                        const val = document.getElementById('amp-fade-val');
+                        if (slider && val) {
+                            slider.value = msg.data.amplitude_fade_ms;
+                            val.textContent = msg.data.amplitude_fade_ms + 'ms';
                         }
                     }
                     break;
@@ -920,6 +942,11 @@ DASHBOARD_HTML = """
             log(`Master volume set to ${Math.round(value * 100)}%`, 'event');
         }
         
+        function setAmplitudeFade(ms) {
+            sendCommand('set_amplitude_fade', { fade_ms: ms });
+            log(`Amplitude fade set to ${ms}ms`, 'event');
+        }
+        
         function moveBigMoversTo(character) {
             sendCommand('movers_to_character', { character });
             log(`Big movers to ${character}`, 'event');
@@ -980,6 +1007,7 @@ class DMXOSCBridge:
         self.last_update: Dict[str, float] = {}
         self.master_volume: float = 0.75  # Master volume multiplier for all mannequin voices
         self.character_volumes: Dict[str, float] = {}  # Per-character volume adjustments (for uneven TTS loudness)
+        self.amplitude_fade_ms: int = 0  # Fade time for amplitude-reactive lighting (0 = instant)
         
         # Load persistent state (master volume, per-character volumes)
         self._load_persistent_state()
@@ -1085,11 +1113,12 @@ class DMXOSCBridge:
                 with open(STATE_FILE) as f:
                     state = json.load(f)
                 self.master_volume = state.get("master_volume", 0.75)
+                self.amplitude_fade_ms = state.get("amplitude_fade_ms", 0)
                 self.character_volumes = state.get("character_volumes", {})
                 self._saved_character_colors = state.get("character_colors", {})
                 self._saved_narrator_colors = state.get("narrator_colors", {})
                 self._saved_house_light_colors = state.get("house_light_colors", {})
-                print(f"📂 Loaded persistent state: master={self.master_volume:.0%}")
+                print(f"📂 Loaded persistent state: master={self.master_volume:.0%}, amp_fade={self.amplitude_fade_ms}ms")
                 if self.character_volumes:
                     print(f"   Character volumes: {self.character_volumes}")
                 if self._saved_character_colors:
@@ -1139,6 +1168,7 @@ class DMXOSCBridge:
         
         state = {
             "master_volume": self.master_volume,
+            "amplitude_fade_ms": self.amplitude_fade_ms,
             "character_volumes": self.character_volumes,
             "character_colors": character_colors,
             "narrator_colors": narrator_colors,
@@ -1399,6 +1429,11 @@ class DMXOSCBridge:
             self.master_volume = data["volume"]
             self._save_persistent_state()
             print(f"🔊 Master volume set to {self.master_volume * 100:.0f}%")
+        # Amplitude fade
+        elif cmd == "set_amplitude_fade":
+            self.amplitude_fade_ms = data["fade_ms"]
+            self._save_persistent_state()
+            print(f"💡 Amplitude fade set to {self.amplitude_fade_ms}ms")
         # Stop all thinking
         elif cmd == "stop_all_thinking":
             await self._stop_all_thinking()
@@ -1440,6 +1475,7 @@ class DMXOSCBridge:
             "house_lights": self.get_house_light_info(),
             "movers": self.get_mover_info(),
             "master_volume": self.master_volume,
+            "amplitude_fade_ms": self.amplitude_fade_ms,
         }
     
     async def _broadcast_state(self):
@@ -1885,9 +1921,9 @@ class DMXOSCBridge:
         curved_amplitude = amplitude ** 0.7
         brightness = min_brightness + (curved_amplitude * (max_brightness - min_brightness))
         
-        # Update brightness with INSTANT mode (no fade for responsive amplitude tracking)
+        # Update brightness with configurable fade (0 = instant, higher = smoother)
         self.current_brightness[effective_body] = brightness
-        await self._set_par_brightness_for_character(effective_body, brightness, instant=True)
+        await self._set_par_brightness_for_character(effective_body, brightness, fade_ms=self.amplitude_fade_ms)
     
     async def _set_par_color_and_brightness(self, character: str, color: Tuple[int, ...], brightness: float):
         """Set both color and brightness for a character's par can."""
@@ -2123,13 +2159,13 @@ class DMXOSCBridge:
             x32 = self.character_x32[effective_body]
             self._x32_set_channel(x32, effective_body, active=False)
     
-    async def _set_par_brightness_for_character(self, character_name: str, brightness: float, instant: bool = False):
+    async def _set_par_brightness_for_character(self, character_name: str, brightness: float, fade_ms: Optional[int] = None):
         """Set par can brightness for a character.
         
         Args:
             character_name: The character to update
             brightness: 0.0-1.0 brightness level
-            instant: If True, set immediately without fade (for amplitude tracking)
+            fade_ms: Fade time in ms. None = use default fade, 0 = instant
         """
         if character_name not in self.dmx_channels:
             return
@@ -2188,11 +2224,15 @@ class DMXOSCBridge:
             values[par.channel_map["dimmer"]] = 255 if brightness > 0 else 0
         
         # Set with fade or instant (for amplitude-reactive lighting)
-        if instant:
-            channel.set_values(values)  # Instant update for amplitude
+        if fade_ms is not None:
+            if fade_ms == 0:
+                channel.set_values(values)  # Instant update
+            else:
+                channel.add_fade(values, fade_ms)  # Short fade for smoothing
         else:
-            fade_ms = int(par.fade_time * 1000)
-            channel.add_fade(values, fade_ms)
+            # Default fade from config
+            default_fade_ms = int(par.fade_time * 1000)
+            channel.add_fade(values, default_fade_ms)
     
     async def _move_head(self, mover: MovingHeadFixture, position: Tuple[int, int]):
         """Move a moving head to position."""
