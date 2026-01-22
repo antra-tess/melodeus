@@ -18,7 +18,7 @@ from datetime import datetime
 import websockets
 import numpy as np
 
-from mel_aec_audio import ensure_stream_started, prepare_capture_chunk, shared_sample_rate
+from mel_aec_audio import ensure_stream_started, prepare_capture_chunk
 
 # Import shared types from the main STT module
 from async_stt_module import STTEventType, STTResult, STTConfig
@@ -318,15 +318,13 @@ class AsyncSTTElevenLabs:
                     end_time=self.audio_window_end,
                     confidence=1.0
                 )
-                # Use actual audio sample rate (48kHz from mel_aec), not config sample rate (16kHz)
-                actual_sample_rate = shared_sample_rate()
+                # Audio frames are counted in resampled audio (config.sample_rate)
                 user_tag = self.voice_fingerprinter.process_transcript_words(
                     word_timings=[word_timing],
-                    sample_rate=actual_sample_rate
+                    sample_rate=self.config.sample_rate
                 )
         elif self.voice_fingerprinter:
-            # Use actual audio sample rate for TitaNet
-            actual_sample_rate = shared_sample_rate()
+            # Audio frames are counted in resampled audio (config.sample_rate)
             word_timing = WordTiming(
                 word=text,
                 speaker_id="speaker_0",
@@ -336,7 +334,7 @@ class AsyncSTTElevenLabs:
             )
             user_tag = self.voice_fingerprinter.process_transcript_words(
                 word_timings=[word_timing],
-                sample_rate=actual_sample_rate
+                sample_rate=self.config.sample_rate
             )
         
         # Generate or reuse message ID
@@ -410,12 +408,13 @@ class AsyncSTTElevenLabs:
                     except Exception:
                         pass  # Don't let callback errors affect STT
                 
-                # Feed to TitaNet if enabled (use actual sample rate, not config)
+                # Feed to TitaNet if enabled
+                # Note: audio_np is already resampled to config.sample_rate by prepare_capture_chunk
                 if self.voice_fingerprinter is not None:
                     self.voice_fingerprinter.add_audio_chunk(
                         audio_np,
                         self.num_audio_frames_received,
-                        shared_sample_rate(),  # 48kHz from mel_aec, not 16kHz from config
+                        self.config.sample_rate,  # Audio is resampled to this rate
                     )
                 self.num_audio_frames_received += len(audio_np)
                 
