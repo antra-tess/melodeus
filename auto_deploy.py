@@ -52,10 +52,9 @@ CONFIG_FILES = {
     "config.yaml",
 }
 
-# Config directories to sync
+# Config directories to sync (NOT context_states - that's runtime data!)
 CONFIG_DIRS = {
     "presets",
-    "context_states",
 }
 
 
