@@ -203,6 +203,20 @@
         .level-bar.output-level {
             background: linear-gradient(90deg, #2196F3 0%, #03A9F4 50%, #00BCD4 75%, #009688 100%);
         }
+        
+        .peak-indicator {
+            position: absolute;
+            width: 2px;
+            height: 100%;
+            background: #fff;
+            opacity: 0.8;
+            left: 0%;
+            transition: left 0.05s ease-out, opacity 0.5s ease-out;
+        }
+        
+        .level-meter {
+            position: relative;
+        }
 
         .toggle-switch {
             width: 32px;
@@ -654,12 +668,14 @@
                     <span class="level-label">🎤 In</span>
                     <div class="level-meter">
                         <div class="level-bar input-level" id="input-level-bar"></div>
+                        <div class="peak-indicator" id="input-peak-indicator"></div>
                     </div>
                 </div>
                 <div class="level-meter-row">
                     <span class="level-label">🔊 Out</span>
                     <div class="level-meter">
                         <div class="level-bar output-level" id="output-level-bar"></div>
+                        <div class="peak-indicator" id="output-peak-indicator"></div>
                     </div>
                 </div>
             </div>
@@ -1108,14 +1124,46 @@
             }
         }
         
+        // Peak level tracking
+        let inputPeakLevel = 0;
+        let outputPeakLevel = 0;
+        let inputPeakTime = 0;
+        let outputPeakTime = 0;
+        const PEAK_HOLD_MS = 2000;  // Hold peak for 2 seconds
+        const PEAK_DECAY_RATE = 0.02;  // Decay rate per update after hold
+        
         function updateAudioLevels(data) {
             const inputBar = document.getElementById('input-level-bar');
             const outputBar = document.getElementById('output-level-bar');
+            const inputPeak = document.getElementById('input-peak-indicator');
+            const outputPeak = document.getElementById('output-peak-indicator');
+            const now = Date.now();
+            
             if (inputBar && data.input !== undefined) {
                 inputBar.style.width = (data.input * 100) + '%';
+                // Update peak
+                if (data.input >= inputPeakLevel) {
+                    inputPeakLevel = data.input;
+                    inputPeakTime = now;
+                } else if (now - inputPeakTime > PEAK_HOLD_MS) {
+                    inputPeakLevel = Math.max(data.input, inputPeakLevel - PEAK_DECAY_RATE);
+                }
+                if (inputPeak) {
+                    inputPeak.style.left = (inputPeakLevel * 100) + '%';
+                }
             }
             if (outputBar && data.output !== undefined) {
                 outputBar.style.width = (data.output * 100) + '%';
+                // Update peak
+                if (data.output >= outputPeakLevel) {
+                    outputPeakLevel = data.output;
+                    outputPeakTime = now;
+                } else if (now - outputPeakTime > PEAK_HOLD_MS) {
+                    outputPeakLevel = Math.max(data.output, outputPeakLevel - PEAK_DECAY_RATE);
+                }
+                if (outputPeak) {
+                    outputPeak.style.left = (outputPeakLevel * 100) + '%';
+                }
             }
         }
         
@@ -1485,11 +1533,6 @@
         }
 
         function deleteSpeaker(speakerId) {
-            const displayName = speakerId.startsWith('unknown_speaker_')
-                ? 'User ' + speakerId.replace('unknown_speaker_', '')
-                : speakerId;
-            if (!confirm(`Delete speaker "${displayName}"?`)) return;
-
             if (ws && ws.readyState === WebSocket.OPEN) {
                 ws.send(JSON.stringify({
                     type: 'delete_speaker',
