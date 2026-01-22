@@ -726,6 +726,7 @@ DASHBOARD_HTML = """
                             <span class="value-display">${Math.round(brightness * 100)}%</span>
                         </div>
                         
+                        ${char.dmx_address ? `
                         <div class="control-row">
                             <label>Color</label>
                             <input type="color" value="${rgbToHex(color[0], color[1], color[2])}"
@@ -734,6 +735,7 @@ DASHBOARD_HTML = """
                                    onchange="setNarratorColor('${name}', this.value)" title="Narrator voice color" style="margin-left: 5px;">
                             <span class="value-display" style="font-size: 9px;">Voice/Narr</span>
                         </div>
+                        ` : ''}
                         
                         ${char.x32_channel ? `
                         <div class="control-row">
@@ -1528,17 +1530,23 @@ class DMXOSCBridge:
     
     async def _set_narrator_color(self, character: str, color: List[int]):
         """Manually set narrator color for a character."""
+        print(f"📖 Setting narrator color for {character}: {color}")
         if character not in self.character_fixtures:
+            print(f"   ❌ Character {character} not found in fixtures")
             return
         
         fixtures = self.character_fixtures[character]
         if fixtures.par_can:
             fixtures.par_can.narrator_color = tuple(color)
-            # If currently in narrator mode, update the display
+            print(f"   ✅ Set narrator color to {color}")
+            # If currently in narrator mode, update the display immediately
             if character in self.narrator_active:
+                print(f"   🎨 Character is in narrator mode, updating display")
                 brightness = self.current_brightness.get(character, 0.1)
                 if character in self.dmx_channels:
                     await self._set_par_brightness_for_character(character, brightness)
+        else:
+            print(f"   ❌ Character {character} has no par_can")
     
     async def _set_x32_fader_manual(self, character: str, fader: float):
         """Manually set X32 fader."""
