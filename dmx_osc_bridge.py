@@ -1867,7 +1867,7 @@ class DMXOSCBridge:
         asyncio.create_task(self._set_amplitude_brightness(character_name, amplitude))
     
     async def _set_amplitude_brightness(self, character_name: str, amplitude: float):
-        """Set brightness based on audio amplitude."""
+        """Set brightness based on audio amplitude (instant, no fade)."""
         effective_body = self._get_effective_body(character_name)
         if effective_body not in self.character_fixtures:
             return
@@ -1885,9 +1885,9 @@ class DMXOSCBridge:
         curved_amplitude = amplitude ** 0.7
         brightness = min_brightness + (curved_amplitude * (max_brightness - min_brightness))
         
-        # Update brightness (this will use narrator/character color automatically)
+        # Update brightness with INSTANT mode (no fade for responsive amplitude tracking)
         self.current_brightness[effective_body] = brightness
-        await self._set_par_brightness_for_character(effective_body, brightness)
+        await self._set_par_brightness_for_character(effective_body, brightness, instant=True)
     
     async def _set_par_color_and_brightness(self, character: str, color: Tuple[int, ...], brightness: float):
         """Set both color and brightness for a character's par can."""
@@ -2123,8 +2123,14 @@ class DMXOSCBridge:
             x32 = self.character_x32[effective_body]
             self._x32_set_channel(x32, effective_body, active=False)
     
-    async def _set_par_brightness_for_character(self, character_name: str, brightness: float):
-        """Set par can brightness for a character."""
+    async def _set_par_brightness_for_character(self, character_name: str, brightness: float, instant: bool = False):
+        """Set par can brightness for a character.
+        
+        Args:
+            character_name: The character to update
+            brightness: 0.0-1.0 brightness level
+            instant: If True, set immediately without fade (for amplitude tracking)
+        """
         if character_name not in self.dmx_channels:
             return
         
@@ -2181,11 +2187,12 @@ class DMXOSCBridge:
         if "dimmer" in par.channel_map:
             values[par.channel_map["dimmer"]] = 255 if brightness > 0 else 0
         
-        # Set with fade
-        fade_ms = int(par.fade_time * 1000)
-        channel.add_fade(values, fade_ms)
-        
-        print(f"   💡 {character_name} @{par.dmx_address}: RGB=({int(r*brightness)},{int(g*brightness)},{int(b*brightness)}) dim={brightness:.0%}")
+        # Set with fade or instant (for amplitude-reactive lighting)
+        if instant:
+            channel.set_values(values)  # Instant update for amplitude
+        else:
+            fade_ms = int(par.fade_time * 1000)
+            channel.add_fade(values, fade_ms)
     
     async def _move_head(self, mover: MovingHeadFixture, position: Tuple[int, int]):
         """Move a moving head to position."""
