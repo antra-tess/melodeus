@@ -639,15 +639,15 @@
                 <div class="toggle-row">
                     <span>STT Active</span>
                     <div class="toggle-switch" id="stt-toggle" onclick="toggleSTT()"></div>
-                </div>
+        </div>
                 <div class="toggle-row">
                     <span>Mute While AI Speaks</span>
                     <div class="toggle-switch on" id="mute-while-speaking-toggle" onclick="toggleMuteWhileSpeaking()"></div>
-                </div>
+    </div>
                 <div class="toggle-row">
                     <span>Interruptions</span>
                     <div class="toggle-switch" id="interruptions-toggle" onclick="toggleInterruptions()"></div>
-                </div>
+        </div>
                 <button class="sidebar-btn danger" onclick="forceInterrupt()">🛑 Force Interrupt</button>
                 <button class="sidebar-btn" onclick="resetFingerprints()">🔄 Reset Voices</button>
                 <button class="sidebar-btn warning" onclick="restartServer()">🔃 Restart Server</button>
@@ -678,7 +678,7 @@
                         <div class="peak-indicator" id="output-peak-indicator"></div>
                     </div>
                 </div>
-            </div>
+    </div>
     
             <div class="sidebar-section" id="learned-speakers-section" style="display: none;">
                 <h3>Learned Speakers</h3>
@@ -699,7 +699,7 @@
                 <div id="user-card" class="speaker-card">
                     <h3>👤 USER</h3>
                     <span class="status-text">Idle</span>
-                </div>
+        </div>
     </div>
     
             <!-- Message Input -->
@@ -924,7 +924,7 @@
         
         function updateTranscription(data) {
             const transcript = document.getElementById('transcript');
-
+            
             if (data.is_interim) {
                 let interim = document.getElementById('interim-msg');
                 if (!interim) {
@@ -1015,13 +1015,13 @@
                 delete currentMessages[data.session_id];
                 delete streamAccumulators[data.session_id];  // Clean up accumulator
                 messageCount++;
-                document.getElementById('message-count').textContent = messageCount;
+            document.getElementById('message-count').textContent = messageCount;
             }
         }
         
         function handleAIStreamStart(data) {
-            const transcript = document.getElementById('transcript');
-            const msg = document.createElement('div');
+                const transcript = document.getElementById('transcript');
+                const msg = document.createElement('div');
             msg.className = `message ai`;
             msg.setAttribute('data-session-id', data.session_id);
             msg.innerHTML = `
@@ -1029,8 +1029,8 @@
                 <div class="message-content"></div>
             `;
             msg.id = data.message_id;
-            transcript.appendChild(msg);
-            transcript.scrollTop = transcript.scrollHeight;
+                transcript.appendChild(msg);
+                transcript.scrollTop = transcript.scrollHeight;
             currentMessages[data.session_id] = msg;
         }
         
@@ -1174,7 +1174,7 @@
             const turns = data.turns || data.history || [];
             if (turns.length > 0) {
                 turns.forEach((turn, index) => {
-                    const msg = document.createElement('div');
+                const msg = document.createElement('div');
                     const isUser = turn.role === 'user';
                     msg.className = `message ${isUser ? 'user' : 'ai'}`;
                     const msgId = `msg_${index}`;
@@ -1182,24 +1182,24 @@
                     
                     const speakerName = turn.speaker_name || (isUser ? 'USER' : turn.character || 'AI');
                     const role = isUser ? 'user' : 'ai';
-                    msg.innerHTML = `
-                        <div class="speaker-name">${speakerName}</div>
-                        <div class="message-content">${escapeHtml(turn.content)}</div>
-                        ${turn.editable ? `
-                            <div class="message-actions">
+                msg.innerHTML = `
+                    <div class="speaker-name">${speakerName}</div>
+                    <div class="message-content">${escapeHtml(turn.content)}</div>
+                    ${turn.editable ? `
+                        <div class="message-actions">
                                 <button onclick="replayAudio('${msgId}', '${role}')" title="Replay audio">🔊</button>
                                 <button onclick="editMessage('${msgId}')">✏️</button>
                                 <button onclick="deleteMessage('${msgId}')">🗑️</button>
-                            </div>
-                        ` : ''}
-                    `;
-                    transcript.appendChild(msg);
+                        </div>
+                    ` : ''}
+                `;
+                transcript.appendChild(msg);
                 });
                 messageCount = turns.length;
             document.getElementById('message-count').textContent = messageCount;
                 // Delay scroll to ensure DOM has rendered
                 requestAnimationFrame(() => {
-                    transcript.scrollTop = transcript.scrollHeight;
+            transcript.scrollTop = transcript.scrollHeight;
                 });
             }
         }
@@ -1207,8 +1207,19 @@
         function handleMessageUpdated(data) {
             const msg = document.getElementById(data.id);
             if (msg) {
-                const content = msg.querySelector('.message-content');
-                if (content) content.textContent = data.new_text;
+                // Update text content if provided
+                if (data.new_text) {
+                    const content = msg.querySelector('.message-content');
+                    if (content) content.textContent = data.new_text;
+                }
+                // Update speaker name if provided (from batch diarization corrections)
+                if (data.speaker) {
+                    const speakerEl = msg.querySelector('.speaker-name');
+                    if (speakerEl) {
+                        speakerEl.textContent = data.speaker.toUpperCase();
+                        console.log(`🔄 Speaker corrected: ${data.id} -> ${data.speaker}`);
+                    }
+                }
             }
         }
         
@@ -1246,8 +1257,8 @@
                     <span class="status-text">Idle</span>
                     <div class="card-actions">
                         <button class="card-btn trigger-large" onclick="event.stopPropagation(); triggerCharacter('${char.name}')">▶</button>
-                    </div>
-                `;
+                </div>
+            `;
                 panel.appendChild(card);
             });
             
@@ -1267,7 +1278,7 @@
         
         function setNextAiSpeaker(character) {
             if (ws && ws.readyState === WebSocket.OPEN) {
-                ws.send(JSON.stringify({ 
+                ws.send(JSON.stringify({
                     type: 'set_last_ai_speaker',
                     data: { character: character }
                 }));
@@ -1308,7 +1319,7 @@
         
         function switchContext(name) {
             if (ws && ws.readyState === WebSocket.OPEN) {
-                ws.send(JSON.stringify({ 
+                ws.send(JSON.stringify({
                     type: 'switch_context',
                     data: { context_name: name }
                 }));
@@ -1387,9 +1398,9 @@
         
         function updateInterruptionsToggle() {
             const toggle = document.getElementById('interruptions-toggle');
-            if (interruptionsEnabled) {
+                if (interruptionsEnabled) {
                 toggle.classList.add('on');
-            } else {
+                } else {
                 toggle.classList.remove('on');
             }
         }
@@ -1437,7 +1448,7 @@
             const toggle = document.getElementById('learning-mode-toggle');
             if (learningModeEnabled) {
                 toggle.classList.add('on');
-            } else {
+                } else {
                 toggle.classList.remove('on');
             }
             if (ws && ws.readyState === WebSocket.OPEN) {

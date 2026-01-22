@@ -543,8 +543,19 @@
         function handleMessageUpdated(data) {
             const msg = document.getElementById(data.id);
             if (msg) {
-                const content = msg.querySelector('.utterance-content');
-                if (content) content.textContent = data.new_text;
+                // Update text content if provided
+                if (data.new_text) {
+                    const content = msg.querySelector('.utterance-content');
+                    if (content) content.textContent = data.new_text;
+                }
+                // Update speaker name if provided (from batch diarization corrections)
+                if (data.speaker) {
+                    const speakerEl = msg.querySelector('.utterance-speaker span');
+                    if (speakerEl) {
+                        speakerEl.textContent = data.speaker;
+                        console.log(`🔄 Speaker corrected: ${data.id} -> ${data.speaker}`);
+                    }
+                }
             }
         }
 

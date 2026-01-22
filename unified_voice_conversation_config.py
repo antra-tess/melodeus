@@ -1300,6 +1300,9 @@ class UnifiedVoiceConversation:
         # Handle speaker changes
         #self.stt.on(STTEventType.SPEAKER_CHANGE, self._on_speaker_change)
         
+        # Handle speaker corrections from batch diarization
+        self.stt.on(STTEventType.SPEAKER_CORRECTION, self._on_speaker_correction)
+        
         # Handle errors
         self.stt.on(STTEventType.ERROR, self._on_error)
         
@@ -2247,6 +2250,41 @@ class UnifiedVoiceConversation:
         
         if self.config.development.enable_debug_mode:
             self.logger.debug(f"Speaker change: {speaker_id} -> {speaker_name}")
+    
+    async def _on_speaker_correction(self, data):
+        """Handle speaker corrections from batch diarization.
+        
+        Updates the UI when batch diarization corrects speaker labels
+        for previously transcribed messages.
+        """
+        message_ids = data.get("message_ids", [])
+        corrected_speaker = data.get("corrected_speaker", "Unknown")
+        text = data.get("text", "")
+        
+        print(f"🔄 Speaker correction: {len(message_ids)} message(s) -> {corrected_speaker}")
+        
+        if not message_ids:
+            return
+        
+        # Broadcast update to UI for each corrected message
+        if hasattr(self, 'ui_server') and self.ui_server:
+            from websocket_ui_server import UIMessage
+            for msg_id in message_ids:
+                await self.ui_server.broadcast(UIMessage(
+                    type="message_updated",
+                    data={
+                        "id": msg_id,
+                        "speaker": corrected_speaker,
+                        "new_text": text  # Include text in case it was also corrected
+                    }
+                ))
+        
+        # Also update the conversation history with corrected speaker
+        for turn in self.state.conversation_history:
+            if turn.get("message_id") in message_ids:
+                old_speaker = turn.get("speaker_name", "Unknown")
+                turn["speaker_name"] = corrected_speaker
+                print(f"   Updated history: {old_speaker} -> {corrected_speaker}")
     
     async def _on_error(self, data):
         """Handle STT errors."""
