@@ -75,6 +75,7 @@ class ParCanFixture:
         "red": 0, "green": 1, "blue": 2, "lime": 3, "amber": 4, "uv": 5, "shutter": 6, "dimmer": 7
     })
     color: Tuple[int, ...] = (255, 200, 150, 100, 120, 0)  # R, G, B, Lime, Amber, UV
+    narrator_color: Tuple[int, ...] = (255, 255, 255, 200, 0, 0)  # White/neutral for narrator
     shutter_on: int = 63  # DMX value for shutter open (32-63 = On)
     idle_brightness: float = 0.1  # 10% when idle
     active_brightness: float = 1.0  # 100% when speaking
@@ -960,6 +961,7 @@ class DMXOSCBridge:
         # State tracking
         self.speaking_characters: Set[str] = set()
         self.thinking_characters: Set[str] = set()
+        self.narrator_active: Set[str] = set()  # Characters currently speaking as narrator
         self.pulse_tasks: Dict[str, asyncio.Task] = {}  # Character -> pulse task
         self.thinking_timeout_tasks: Dict[str, asyncio.Task] = {}  # Character -> timeout task
         self.current_brightness: Dict[str, float] = {}
@@ -1138,6 +1140,8 @@ class DMXOSCBridge:
             if "par_can" in char_cfg:
                 pc = char_cfg["par_can"]
                 color = tuple(pc.get("color", [255, 200, 150, 100, 120, 0]))
+                # Default narrator color: white/neutral if not specified
+                narrator_color = tuple(pc.get("narrator_color", [255, 255, 255, 200, 0, 0]))
                 channel_map = pc.get("channel_map", {
                     "red": 0, "green": 1, "blue": 2, "lime": 3, "amber": 4, "uv": 5, "shutter": 6, "dimmer": 7
                 })
@@ -1146,6 +1150,7 @@ class DMXOSCBridge:
                     channels=pc.get("channels", 8),
                     channel_map=channel_map,
                     color=color,
+                    narrator_color=narrator_color,
                     shutter_on=pc.get("shutter_on", 63),
                     idle_brightness=pc.get("idle_brightness", 0.1),
                     active_brightness=pc.get("active_brightness", 1.0),
@@ -1401,6 +1406,7 @@ class DMXOSCBridge:
             "characters": characters,
             "speaking": list(self.speaking_characters),
             "thinking": list(self.thinking_characters),
+            "narrator": list(self.narrator_active),  # Characters speaking as narrator
             "body_possession": dict(self.body_possession),  # Who is inhabiting which body
             "artnet_connected": self.artnet_node is not None,
             "x32_connected": self.x32_client is not None,
@@ -1564,6 +1570,8 @@ class DMXOSCBridge:
         dispatcher.map("/character/speaking/stop", self._on_speaking_stop)
         dispatcher.map("/character/thinking/start", self._on_thinking_start)
         dispatcher.map("/character/thinking/stop", self._on_thinking_stop)
+        dispatcher.map("/character/narrator/start", self._on_narrator_start)
+        dispatcher.map("/character/narrator/stop", self._on_narrator_stop)
         dispatcher.map("/character/move_body", self._on_move_body)
         dispatcher.map("/avatar/color", self._on_avatar_color)
         dispatcher.map("/test", self._on_test)
@@ -1755,6 +1763,78 @@ class DMXOSCBridge:
                 await self._on_thinking_stop_async(character_name)
         except asyncio.CancelledError:
             pass  # Normal cancellation when thinking stops normally
+    
+    def _on_narrator_start(self, address, character_name):
+        """Handle character starting to speak as narrator (different voice/color)."""
+        print(f"📖 {character_name} narrator mode ON")
+        self.narrator_active.add(character_name)
+        asyncio.create_task(self._apply_narrator_color(character_name))
+    
+    def _on_narrator_stop(self, address, character_name):
+        """Handle character stopping narrator mode (back to normal voice/color)."""
+        print(f"📖 {character_name} narrator mode OFF")
+        self.narrator_active.discard(character_name)
+        asyncio.create_task(self._apply_character_color(character_name))
+    
+    async def _apply_narrator_color(self, character_name: str):
+        """Apply narrator color to character's fixture."""
+        effective_body = self._get_effective_body(character_name)
+        if effective_body not in self.character_fixtures:
+            return
+        
+        fixtures = self.character_fixtures[effective_body]
+        if fixtures.par_can and effective_body in self.dmx_channels:
+            # Use narrator color
+            color = fixtures.par_can.narrator_color
+            brightness = self.current_brightness.get(effective_body, fixtures.par_can.idle_brightness)
+            await self._set_par_color_and_brightness(effective_body, color, brightness)
+            print(f"   🎨 Applied narrator color to {effective_body}")
+        
+        await self._broadcast_state()
+    
+    async def _apply_character_color(self, character_name: str):
+        """Apply normal character color to fixture."""
+        effective_body = self._get_effective_body(character_name)
+        if effective_body not in self.character_fixtures:
+            return
+        
+        fixtures = self.character_fixtures[effective_body]
+        if fixtures.par_can and effective_body in self.dmx_channels:
+            # Use normal character color
+            color = fixtures.par_can.color
+            brightness = self.current_brightness.get(effective_body, fixtures.par_can.idle_brightness)
+            await self._set_par_color_and_brightness(effective_body, color, brightness)
+            print(f"   🎨 Applied normal color to {effective_body}")
+        
+        await self._broadcast_state()
+    
+    async def _set_par_color_and_brightness(self, character: str, color: Tuple[int, ...], brightness: float):
+        """Set both color and brightness for a character's par can."""
+        if character not in self.character_fixtures:
+            return
+        
+        fixtures = self.character_fixtures[character]
+        if not fixtures.par_can or character not in self.dmx_channels:
+            return
+        
+        par = fixtures.par_can
+        channel = self.dmx_channels[character]
+        
+        # Build DMX values with color and brightness
+        dmx_values = [0] * par.channels
+        
+        # Set color channels with brightness scaling
+        for color_name, channel_idx in par.channel_map.items():
+            if color_name in ["red", "green", "blue", "lime", "amber", "uv"]:
+                color_map = {"red": 0, "green": 1, "blue": 2, "lime": 3, "amber": 4, "uv": 5}
+                if color_name in color_map and color_map[color_name] < len(color):
+                    dmx_values[channel_idx] = int(color[color_map[color_name]] * brightness)
+            elif color_name == "shutter":
+                dmx_values[channel_idx] = par.shutter_on
+            elif color_name == "dimmer":
+                dmx_values[channel_idx] = int(255 * brightness)
+        
+        channel.set_values(dmx_values)
     
     def _on_move_body(self, address, character_name, target_body):
         """Handle character moving to another body/mannequin.
@@ -1974,8 +2054,16 @@ class DMXOSCBridge:
         par = fixtures.par_can
         channel = self.dmx_channels[character_name]
         
+        # Check if any character using this body is in narrator mode
+        is_narrator = character_name in self.narrator_active
+        # Also check if any character possessing this body is in narrator mode
+        for char, body in self.body_possession.items():
+            if body == character_name and char in self.narrator_active:
+                is_narrator = True
+                break
+        
         # Get color values (supports RGBLAU - Red, Green, Blue, Lime, Amber, UV)
-        color = par.color
+        color = par.narrator_color if is_narrator else par.color
         r = color[0] if len(color) > 0 else 0
         g = color[1] if len(color) > 1 else 0
         b = color[2] if len(color) > 2 else 0
