@@ -501,6 +501,19 @@ DASHBOARD_HTML = """
                 <span>Smooth</span>
             </div>
         </div>
+        <div style="margin-top: 15px; padding: 15px; background: var(--bg-card); border-radius: 8px; max-width: 400px;">
+            <label style="display: flex; align-items: center; gap: 10px; font-size: 14px;">
+                <span>📢 Main Boost (Ch17/18):</span>
+                <span id="main-boost-val" style="min-width: 45px; text-align: right;">+15%</span>
+                <span id="main-boost-active" style="color: #22c55e; font-size: 12px; display: none;">● ACTIVE</span>
+            </label>
+            <input type="range" id="main-boost-slider" min="0" max="50" value="15" style="width: 100%; margin-top: 8px;"
+                   oninput="document.getElementById('main-boost-val').textContent = '+' + this.value + '%'"
+                   onchange="setMainBoost(this.value / 100)">
+            <div style="font-size: 10px; color: var(--text-muted); margin-top: 4px;">
+                Boost X32 channels 17/18 when avatars without dedicated channels speak
+            </div>
+        </div>
     </div>
     
     <!-- House Lights Section -->
@@ -580,6 +593,21 @@ DASHBOARD_HTML = """
                         if (slider && val) {
                             slider.value = msg.data.amplitude_fade_ms;
                             val.textContent = msg.data.amplitude_fade_ms + 'ms';
+                        }
+                    }
+                    // Update main boost slider and active indicator
+                    if (msg.data.x32_main_boost !== undefined) {
+                        const slider = document.getElementById('main-boost-slider');
+                        const val = document.getElementById('main-boost-val');
+                        if (slider && val) {
+                            slider.value = Math.round(msg.data.x32_main_boost * 100);
+                            val.textContent = '+' + slider.value + '%';
+                        }
+                    }
+                    if (msg.data.x32_boosted !== undefined) {
+                        const active = document.getElementById('main-boost-active');
+                        if (active) {
+                            active.style.display = msg.data.x32_boosted ? 'inline' : 'none';
                         }
                     }
                     break;
@@ -949,6 +977,11 @@ DASHBOARD_HTML = """
             log(`Amplitude fade set to ${ms}ms`, 'event');
         }
         
+        function setMainBoost(value) {
+            sendCommand('set_main_boost', { boost: value });
+            log(`Main boost set to +${Math.round(value * 100)}%`, 'event');
+        }
+        
         function moveBigMoversTo(character) {
             sendCommand('movers_to_character', { character });
             log(`Big movers to ${character}`, 'event');
@@ -1023,6 +1056,15 @@ class DMXOSCBridge:
         self.artnet_universe = None
         self.x32_client: Optional[udp_client.SimpleUDPClient] = None
         self.dmx_channels: Dict[str, any] = {}  # Character name -> DMX channel
+        
+        # X32 bidirectional support
+        self.x32_response_server = None  # OSC server for X32 responses
+        self.x32_fader_cache: Dict[str, float] = {}  # Cache of X32 fader values
+        self.x32_main_channels: List[int] = [17, 18]  # Channels to boost for non-X32 characters
+        self.x32_main_boost: float = 0.15  # How much to boost main channels (0-1 added to current)
+        self.x32_pre_boost_levels: Dict[int, float] = {}  # Store original levels before boost
+        self.x32_boosted: bool = False  # Whether boost is currently applied
+        self._x32_query_futures: Dict[str, asyncio.Future] = {}  # Pending queries
         
         # OSC server for receiving melodeus events
         self.osc_server = None
@@ -1116,11 +1158,12 @@ class DMXOSCBridge:
                     state = json.load(f)
                 self.master_volume = state.get("master_volume", 0.75)
                 self.amplitude_fade_ms = state.get("amplitude_fade_ms", 0)
+                self.x32_main_boost = state.get("x32_main_boost", 0.15)
                 self.character_volumes = state.get("character_volumes", {})
                 self._saved_character_colors = state.get("character_colors", {})
                 self._saved_narrator_colors = state.get("narrator_colors", {})
                 self._saved_house_light_colors = state.get("house_light_colors", {})
-                print(f"📂 Loaded persistent state: master={self.master_volume:.0%}, amp_fade={self.amplitude_fade_ms}ms")
+                print(f"📂 Loaded persistent state: master={self.master_volume:.0%}, amp_fade={self.amplitude_fade_ms}ms, main_boost=+{self.x32_main_boost:.0%}")
                 if self.character_volumes:
                     print(f"   Character volumes: {self.character_volumes}")
                 if self._saved_character_colors:
@@ -1171,6 +1214,7 @@ class DMXOSCBridge:
         state = {
             "master_volume": self.master_volume,
             "amplitude_fade_ms": self.amplitude_fade_ms,
+            "x32_main_boost": self.x32_main_boost,
             "character_volumes": self.character_volumes,
             "character_colors": character_colors,
             "narrator_colors": narrator_colors,
@@ -1306,9 +1350,10 @@ class DMXOSCBridge:
         if ARTNET_AVAILABLE and self.config["artnet"]["enabled"]:
             await self._start_artnet()
         
-        # Start X32 client
+        # Start X32 client and response listener
         if self.config["x32"]["enabled"]:
             self._start_x32_client()
+            await self._start_x32_response_server()
         
         # Start OSC server to receive melodeus events
         await self._start_osc_server()
@@ -1436,6 +1481,11 @@ class DMXOSCBridge:
             self.amplitude_fade_ms = data["fade_ms"]
             self._save_persistent_state()
             print(f"💡 Amplitude fade set to {self.amplitude_fade_ms}ms")
+        # Main boost for non-X32 characters
+        elif cmd == "set_main_boost":
+            self.x32_main_boost = data["boost"]
+            self._save_persistent_state()
+            print(f"🔊 Main boost set to +{self.x32_main_boost * 100:.0f}%")
         # Stop all thinking
         elif cmd == "stop_all_thinking":
             await self._stop_all_thinking()
@@ -1478,6 +1528,8 @@ class DMXOSCBridge:
             "movers": self.get_mover_info(),
             "master_volume": self.master_volume,
             "amplitude_fade_ms": self.amplitude_fade_ms,
+            "x32_main_boost": self.x32_main_boost,
+            "x32_boosted": self.x32_boosted,
         }
     
     async def _broadcast_state(self):
@@ -1645,6 +1697,115 @@ class DMXOSCBridge:
         self.x32_client = udp_client.SimpleUDPClient(cfg["host"], cfg["port"])
         print("   ✅ X32 client ready")
     
+    async def _start_x32_response_server(self):
+        """Start server to receive X32 responses for bidirectional communication."""
+        from pythonosc.osc_server import AsyncIOOSCUDPServer
+        
+        dispatcher = Dispatcher()
+        # Catch all X32 responses
+        dispatcher.set_default_handler(self._on_x32_response)
+        
+        # Listen on a local port for X32 responses
+        # X32 sends responses back to the port we sent from
+        self.x32_response_server = AsyncIOOSCUDPServer(
+            ("0.0.0.0", 10024),  # Local port to receive X32 responses
+            dispatcher,
+            asyncio.get_event_loop()
+        )
+        transport, protocol = await self.x32_response_server.create_serve_endpoint()
+        print("   ✅ X32 response listener on port 10024")
+        
+        # Start xremote keepalive task
+        asyncio.create_task(self._x32_xremote_keepalive())
+    
+    async def _x32_xremote_keepalive(self):
+        """Send /xremote every 8 seconds to stay subscribed to X32 updates."""
+        while True:
+            if self.x32_client:
+                try:
+                    self.x32_client.send_message("/xremote", [])
+                except Exception:
+                    pass
+            await asyncio.sleep(8)
+    
+    def _on_x32_response(self, address: str, *args):
+        """Handle responses from X32."""
+        # Cache fader values
+        if "/mix/fader" in address:
+            if args:
+                self.x32_fader_cache[address] = args[0]
+                # Resolve any pending query
+                if address in self._x32_query_futures:
+                    future = self._x32_query_futures.pop(address)
+                    if not future.done():
+                        future.set_result(args[0])
+    
+    async def _x32_query_fader(self, channel: int, channel_type: str = "ch") -> Optional[float]:
+        """Query current fader value from X32."""
+        if not self.x32_client:
+            return None
+        
+        address = f"/{channel_type}/{channel:02d}/mix/fader"
+        
+        # Check cache first
+        if address in self.x32_fader_cache:
+            return self.x32_fader_cache[address]
+        
+        # Create a future for the response
+        loop = asyncio.get_event_loop()
+        future = loop.create_future()
+        self._x32_query_futures[address] = future
+        
+        # Send query (no value = request current value)
+        self.x32_client.send_message(address, [])
+        
+        try:
+            # Wait for response with timeout
+            result = await asyncio.wait_for(future, timeout=0.5)
+            return result
+        except asyncio.TimeoutError:
+            self._x32_query_futures.pop(address, None)
+            return None
+    
+    async def _x32_apply_main_boost(self):
+        """Apply boost to main channels (17/18) for non-X32 characters."""
+        if self.x32_boosted or not self.x32_client:
+            return
+        
+        print(f"🔊 Applying +{self.x32_main_boost*100:.0f}% boost to channels {self.x32_main_channels}")
+        
+        for ch in self.x32_main_channels:
+            # Query current level
+            current = await self._x32_query_fader(ch)
+            if current is not None:
+                self.x32_pre_boost_levels[ch] = current
+                # Apply boost (capped at 1.0)
+                boosted = min(1.0, current + self.x32_main_boost)
+                self.x32_client.send_message(f"/ch/{ch:02d}/mix/fader", boosted)
+                print(f"   Ch{ch}: {current:.2f} → {boosted:.2f}")
+            else:
+                # Fallback: just set to a reasonable boosted level
+                self.x32_pre_boost_levels[ch] = 0.5
+                self.x32_client.send_message(f"/ch/{ch:02d}/mix/fader", 0.5 + self.x32_main_boost)
+        
+        self.x32_boosted = True
+    
+    async def _x32_restore_main_levels(self):
+        """Restore main channels to pre-boost levels."""
+        if not self.x32_boosted or not self.x32_client:
+            return
+        
+        print(f"🔉 Restoring channels {self.x32_main_channels} to original levels")
+        
+        for ch in self.x32_main_channels:
+            if ch in self.x32_pre_boost_levels:
+                original = self.x32_pre_boost_levels[ch]
+                self.x32_client.send_message(f"/ch/{ch:02d}/mix/fader", original)
+                print(f"   Ch{ch}: → {original:.2f}")
+        
+        self.x32_pre_boost_levels.clear()
+        self.x32_boosted = False
+    
     async def _start_osc_server(self):
         """Start OSC server to receive melodeus events."""
         cfg = self.config["melodeus_osc"]
@@ -1702,6 +1863,12 @@ class DMXOSCBridge:
         
         # Activate with steady light
         await self._activate_character(character_name)
+        
+        # If character has no X32 channel, apply main boost
+        effective_body = self._get_effective_body(character_name)
+        if effective_body not in self.character_x32 and self.x32_main_boost > 0:
+            await self._x32_apply_main_boost()
+        
         await self._broadcast_event("speaking_start", character=character_name)
         await self._broadcast_state()
     
@@ -1716,6 +1883,18 @@ class DMXOSCBridge:
     async def _on_speaking_stop_async(self, character_name: str):
         """Async handler for speaking stop."""
         await self._deactivate_character(character_name)
+        
+        # If character has no X32 channel and no other non-X32 characters are speaking, restore levels
+        effective_body = self._get_effective_body(character_name)
+        if effective_body not in self.character_x32 and self.x32_boosted:
+            # Check if any other non-X32 characters are still speaking
+            other_non_x32_speaking = any(
+                self._get_effective_body(c) not in self.character_x32 
+                for c in self.speaking_characters
+            )
+            if not other_non_x32_speaking:
+                await self._x32_restore_main_levels()
+        
         await self._broadcast_event("speaking_stop", character=character_name)
         await self._broadcast_state()
     
