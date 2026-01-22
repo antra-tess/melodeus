@@ -137,8 +137,33 @@ class AsyncSTTElevenLabs:
             lang = self.config.language.split("-")[0] if "-" in self.config.language else self.config.language
             params["language_code"] = lang
         
-        query_string = "&".join(f"{k}={v}" for k, v in params.items())
-        return f"{self.WS_URL}?{query_string}"
+        # Build query string
+        query_parts = [f"{k}={v}" for k, v in params.items()]
+        
+        # Add keyterms for custom vocabulary (up to 100 terms, max 50 chars each)
+        # ElevenLabs uses context-aware keyterm prompting for better recognition
+        if self.config.keywords:
+            keyterms = []
+            for kw in self.config.keywords:
+                # Handle both dict format {"word": "...", "weight": ...} and simple strings
+                if isinstance(kw, dict):
+                    word = kw.get("word", "")
+                elif isinstance(kw, tuple):
+                    word = kw[0]
+                else:
+                    word = str(kw)
+                
+                if word and len(word) <= 50:
+                    keyterms.append(word)
+            
+            # Add each keyterm as a separate parameter (up to 100)
+            for term in keyterms[:100]:
+                query_parts.append(f"keyterms={term}")
+            
+            if keyterms:
+                print(f"🔤 ElevenLabs keyterms: {keyterms[:10]}{'...' if len(keyterms) > 10 else ''}")
+        
+        return f"{self.WS_URL}?{'&'.join(query_parts)}"
     
     def _handle_audio_capture(self, audio_data) -> None:
         """Handle incoming audio from the microphone."""
