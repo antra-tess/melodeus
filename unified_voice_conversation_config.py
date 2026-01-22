@@ -19,6 +19,7 @@ from anthropic import AsyncAnthropic
 
 # Import our modular systems and config loader
 from async_stt_module import AsyncSTTStreamer, STTEventType # , STTResult
+from async_stt_elevenlabs import AsyncSTTElevenLabs, create_stt_provider
 from async_tts_module import AsyncTTSStreamer
 from config_loader import load_config, VoiceAIConfig
 from tools import create_tool_registry
@@ -119,7 +120,9 @@ class UnifiedVoiceConversation:
             config.stt.aec_filter_length = config.conversation.aec_filter_length
             config.stt.aec_delay_ms = config.conversation.aec_delay_ms
         
-        self.stt = AsyncSTTStreamer(config.stt, config.speakers)
+        # Create STT provider based on config (deepgram or elevenlabs)
+        stt_provider = getattr(config.conversation, 'stt_provider', 'deepgram')
+        self.stt = create_stt_provider(config.stt, config.speakers, provider=stt_provider)
         
         # Initialize TTS system
         self.tts = AsyncTTSStreamer(config.tts)
@@ -1383,7 +1386,8 @@ class UnifiedVoiceConversation:
         """Show a summary of the loaded configuration."""
         print(f"📋 Configuration Summary:")
         print(f"   🎯 Voice ID: {self.config.conversation.voice_id}")
-        print(f"   🎤 STT Model: {self.config.stt.model} ({self.config.stt.language})")
+        stt_provider = getattr(self.config.conversation, 'stt_provider', 'deepgram')
+        print(f"   🎤 STT: {stt_provider.capitalize()} - {self.config.stt.model} ({self.config.stt.language})")
         print(f"   🔊 TTS Model: {self.config.tts.model_id}")
         print(f"   🤖 LLM Model: {self.config.conversation.llm_model}")
         print(f"   ⏱️  Pause Threshold: {self.config.conversation.pause_threshold}s")

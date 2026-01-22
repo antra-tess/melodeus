@@ -41,6 +41,7 @@ class ConversationConfig:
     interruption_confidence: float = 0.8
     
     # STT settings
+    stt_provider: str = "deepgram"  # "deepgram" or "elevenlabs"
     stt_model: str = "nova-3"
     stt_language: str = "en-US"
     interim_results: bool = True
@@ -447,6 +448,7 @@ class ConfigLoader:
             max_wait_time=conversation_config_data.get('max_wait_time', 10.0),
             interruptions_enabled=conversation_config_data.get('interruptions_enabled', False),
             interruption_confidence=conversation_config_data.get('interruption_confidence', 0.8),
+            stt_provider=stt_config_data.get('provider', 'deepgram'),
             stt_model=stt_config_data.get('model', 'nova-3'),
             stt_language=stt_config_data.get('language', 'en-US'),
             interim_results=stt_config_data.get('interim_results', True),
