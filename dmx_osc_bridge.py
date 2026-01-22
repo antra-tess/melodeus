@@ -669,8 +669,11 @@ DASHBOARD_HTML = """
             for (const [name, char] of Object.entries(state.characters)) {
                 const isSpeaking = state.speaking.includes(name);
                 const isThinking = (state.thinking || []).includes(name);
+                const isNarrator = (state.narrator || []).includes(name);
                 const color = char.color || [255, 200, 150, 200];
-                const rgbColor = `rgb(${color[0]}, ${color[1]}, ${color[2]})`;
+                const narratorColor = char.narrator_color || [255, 255, 255, 200, 0, 0];
+                const displayColor = isNarrator ? narratorColor : color;
+                const rgbColor = `rgb(${displayColor[0]}, ${displayColor[1]}, ${displayColor[2]})`;
                 const brightness = char.current_brightness || 0.1;
                 
                 const card = document.createElement('div');
@@ -685,6 +688,7 @@ DASHBOARD_HTML = """
                         <span class="mannequin-name">${name}</span>
                         <span class="thinking-badge">THINKING</span>
                         <span class="speaking-badge">SPEAKING</span>
+                        ${isNarrator ? '<span class="speaking-badge" style="background: #888; opacity: 1;">NARRATOR</span>' : ''}
                     </div>
                     
                     <div class="color-preview" style="background: ${rgbColor}; opacity: ${brightness}">
@@ -703,8 +707,10 @@ DASHBOARD_HTML = """
                         <div class="control-row">
                             <label>Color</label>
                             <input type="color" value="${rgbToHex(color[0], color[1], color[2])}"
-                                   onchange="setColor('${name}', this.value)">
-                            <span class="value-display">RGBW</span>
+                                   onchange="setColor('${name}', this.value)" title="Character voice color">
+                            <input type="color" value="${rgbToHex(narratorColor[0], narratorColor[1], narratorColor[2])}"
+                                   onchange="setNarratorColor('${name}', this.value)" title="Narrator voice color" style="margin-left: 5px;">
+                            <span class="value-display" style="font-size: 9px;">Voice/Narr</span>
                         </div>
                         
                         ${char.x32_channel ? `
@@ -765,6 +771,10 @@ DASHBOARD_HTML = """
         
         function setColor(name, hex) {
             sendCommand('set_color', { character: name, color: hexToRgb(hex) });
+        }
+        
+        function setNarratorColor(name, hex) {
+            sendCommand('set_narrator_color', { character: name, color: hexToRgb(hex) });
         }
         
         function setX32Fader(name, value) {
@@ -1068,6 +1078,7 @@ class DMXOSCBridge:
     def _load_persistent_state(self):
         """Load persistent state from JSON file (master volume, per-character volumes, colors)."""
         self._saved_character_colors: Dict[str, List[int]] = {}
+        self._saved_narrator_colors: Dict[str, List[int]] = {}
         self._saved_house_light_colors: Dict[str, List[int]] = {}
         if STATE_FILE.exists():
             try:
@@ -1076,6 +1087,7 @@ class DMXOSCBridge:
                 self.master_volume = state.get("master_volume", 0.75)
                 self.character_volumes = state.get("character_volumes", {})
                 self._saved_character_colors = state.get("character_colors", {})
+                self._saved_narrator_colors = state.get("narrator_colors", {})
                 self._saved_house_light_colors = state.get("house_light_colors", {})
                 print(f"📂 Loaded persistent state: master={self.master_volume:.0%}")
                 if self.character_volumes:
@@ -1095,6 +1107,14 @@ class DMXOSCBridge:
                     fixtures.par_can.color = tuple(color)
                     print(f"   🎨 Restored color for {char_name}")
         
+        # Apply narrator colors
+        for char_name, color in self._saved_narrator_colors.items():
+            if char_name in self.character_fixtures:
+                fixtures = self.character_fixtures[char_name]
+                if fixtures.par_can:
+                    fixtures.par_can.narrator_color = tuple(color)
+                    print(f"   📖 Restored narrator color for {char_name}")
+        
         # Apply house light colors
         for fixture_name, color in self._saved_house_light_colors.items():
             if fixture_name in self.house_light_state:
@@ -1105,9 +1125,11 @@ class DMXOSCBridge:
         """Save persistent state to JSON file."""
         # Collect current character colors
         character_colors = {}
+        narrator_colors = {}
         for char_name, fixtures in self.character_fixtures.items():
             if fixtures.par_can:
                 character_colors[char_name] = list(fixtures.par_can.color)
+                narrator_colors[char_name] = list(fixtures.par_can.narrator_color)
         
         # Collect house light colors
         house_light_colors = {}
@@ -1119,6 +1141,7 @@ class DMXOSCBridge:
             "master_volume": self.master_volume,
             "character_volumes": self.character_volumes,
             "character_colors": character_colors,
+            "narrator_colors": narrator_colors,
             "house_light_colors": house_light_colors,
         }
         try:
@@ -1336,6 +1359,8 @@ class DMXOSCBridge:
             await self._set_character_brightness(data["character"], data["brightness"])
         elif cmd == "set_color":
             await self._set_character_color(data["character"], data["color"])
+        elif cmd == "set_narrator_color":
+            await self._set_narrator_color(data["character"], data["color"])
         elif cmd == "set_x32_fader":
             await self._set_x32_fader_manual(data["character"], data["fader"])
         elif cmd == "blackout":
@@ -1395,6 +1420,7 @@ class DMXOSCBridge:
             if fixtures.par_can:
                 char_state["dmx_address"] = fixtures.par_can.dmx_address
                 char_state["color"] = list(fixtures.par_can.color)
+                char_state["narrator_color"] = list(fixtures.par_can.narrator_color)
             if name in self.character_x32:
                 x32 = self.character_x32[name]
                 char_state["x32_channel"] = x32.channel
@@ -1463,6 +1489,20 @@ class DMXOSCBridge:
             brightness = self.current_brightness.get(character, 0.1)
             if character in self.dmx_channels:
                 await self._set_par_brightness_for_character(character, brightness)
+    
+    async def _set_narrator_color(self, character: str, color: List[int]):
+        """Manually set narrator color for a character."""
+        if character not in self.character_fixtures:
+            return
+        
+        fixtures = self.character_fixtures[character]
+        if fixtures.par_can:
+            fixtures.par_can.narrator_color = tuple(color)
+            # If currently in narrator mode, update the display
+            if character in self.narrator_active:
+                brightness = self.current_brightness.get(character, 0.1)
+                if character in self.dmx_channels:
+                    await self._set_par_brightness_for_character(character, brightness)
     
     async def _set_x32_fader_manual(self, character: str, fader: float):
         """Manually set X32 fader."""
