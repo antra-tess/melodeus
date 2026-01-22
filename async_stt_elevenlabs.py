@@ -331,25 +331,29 @@ class AsyncSTTElevenLabs:
                 user_tag = f"Speaker {list(speaker_ids)[0]}"
             else:
                 # Fall back to TitaNet
+                # Convert frame counts to seconds for WordTiming
+                start_seconds = self.audio_window_start / self.config.sample_rate
+                end_seconds = self.audio_window_end / self.config.sample_rate
                 word_timing = WordTiming(
                     word=text,
                     speaker_id="speaker_0",
-                    start_time=self.audio_window_start,
-                    end_time=self.audio_window_end,
+                    start_time=start_seconds,
+                    end_time=end_seconds,
                     confidence=1.0
                 )
-                # Audio frames are counted in resampled audio (config.sample_rate)
                 user_tag = self.voice_fingerprinter.process_transcript_words(
                     word_timings=[word_timing],
                     sample_rate=self.config.sample_rate
                 )
         elif self.voice_fingerprinter:
-            # Audio frames are counted in resampled audio (config.sample_rate)
+            # Convert frame counts to seconds for WordTiming
+            start_seconds = self.audio_window_start / self.config.sample_rate
+            end_seconds = self.audio_window_end / self.config.sample_rate
             word_timing = WordTiming(
                 word=text,
                 speaker_id="speaker_0",
-                start_time=self.audio_window_start,
-                end_time=self.audio_window_end,
+                start_time=start_seconds,
+                end_time=end_seconds,
                 confidence=1.0
             )
             user_tag = self.voice_fingerprinter.process_transcript_words(
