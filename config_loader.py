@@ -382,8 +382,12 @@ class ConfigLoader:
                     keywords.append((kw[0], float(kw[1])))
         
         # Create STT configuration
+        # Use the correct API key based on provider
+        stt_provider = stt_config_data.get('provider', 'deepgram')
+        stt_api_key = api_keys['elevenlabs'] if stt_provider == 'elevenlabs' else api_keys['deepgram']
+
         stt_config = STTConfig(
-            api_key=api_keys['deepgram'],
+            api_key=stt_api_key,
             model=stt_config_data.get('model', 'nova-3'),
             language=stt_config_data.get('language', 'en-US'),
             sample_rate=stt_config_data.get('sample_rate', 16000),
