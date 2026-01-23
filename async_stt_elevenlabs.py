@@ -346,6 +346,8 @@ class AsyncSTTElevenLabs:
         if (time.time() - oldest_time_still_same) * 1000 > ms_until_autosend:
             is_edit = self.current_turn_autosent_transcript is not None
             self.current_turn_autosent_transcript = text
+            # Also update last_committed_text to prevent duplicate when committed_transcript arrives
+            self.last_committed_text = text
             
             await self._emit_final_result(
                 text, 
