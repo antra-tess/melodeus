@@ -147,11 +147,12 @@ def restart_service(service_name: str):
     if service_name == "dmx-bridge":
         subprocess.run(["pkill", "-f", "dmx_osc_bridge.py"], capture_output=True)
         time.sleep(1)
+        log_file = open(os.path.join(MELODEUS_DIR, "logs", "dmx-bridge.log"), "a")
         subprocess.Popen(
-            ["./venv/bin/python", "dmx_osc_bridge.py"],
+            ["./venv/bin/python", "-u", "dmx_osc_bridge.py"],
             cwd=MELODEUS_DIR,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stdout=log_file,
+            stderr=subprocess.STDOUT,
             start_new_session=True
         )
         print(f"✅ {service_name} restarted")
@@ -161,11 +162,12 @@ def restart_service(service_name: str):
         time.sleep(1)
         subprocess.run("lsof -ti :8795 :11235 | xargs kill -9 2>/dev/null", shell=True, capture_output=True)
         time.sleep(1)
+        log_file = open(os.path.join(MELODEUS_DIR, "logs", "melodeus.log"), "a")
         subprocess.Popen(
-            ["./venv/bin/python", "unified_voice_conversation_config.py"],
+            ["./venv/bin/python", "-u", "unified_voice_conversation_config.py"],
             cwd=MELODEUS_DIR,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stdout=log_file,
+            stderr=subprocess.STDOUT,
             start_new_session=True
         )
         print(f"✅ {service_name} restarted")
