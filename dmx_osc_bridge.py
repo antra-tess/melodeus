@@ -903,34 +903,74 @@ DASHBOARD_HTML = """
                 const zoom = mover.zoom || 128;
                 const colorVal = mover.color || 0;
                 const hasZoom = mover.has_zoom || false;
-                
+                const hasRgbw = mover.has_rgbw || false;
+                const red = mover.red || 255;
+                const green = mover.green || 255;
+                const blue = mover.blue || 255;
+                const white = mover.white || 255;
+
                 let zoomHtml = '';
                 if (hasZoom) {
                     zoomHtml = `
                         <div style="margin: 8px 0;">
-                            <label style="font-size: 10px; color: var(--text-muted);">Zoom: <span id="zoom-val-${name}">${zoom}</span></label>
+                            <label style="font-size: 10px; color: var(--text-muted);">Focus: <span id="zoom-val-${name}">${zoom}</span></label>
                             <input type="range" min="0" max="255" value="${zoom}" style="width: 100%;"
                                    oninput="document.getElementById('zoom-val-${name}').textContent=this.value"
                                    onchange="setMover('${name}', {zoom: parseInt(this.value)})">
                         </div>
                     `;
                 }
-                
-                // Color buttons
-                let colorBtns = moverColors.map(c => 
-                    `<button onclick="setMover('${name}', {color: ${c.value}})" 
-                             style="width: 24px; height: 24px; background: ${c.css}; border: 2px solid ${colorVal >= c.value && colorVal < c.value + 8 ? 'white' : '#333'}; border-radius: 4px; cursor: pointer;" 
-                             title="${c.name}"></button>`
-                ).join('');
+
+                // RGBW controls for wash fixtures
+                let rgbwHtml = '';
+                if (hasRgbw) {
+                    rgbwHtml = `
+                        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin: 8px 0;">
+                            <div>
+                                <label style="font-size: 10px; color: #ff6666;">R: <span id="r-val-${name}">${red}</span></label>
+                                <input type="range" min="0" max="255" value="${red}" style="width: 100%; accent-color: #ff6666;"
+                                       oninput="document.getElementById('r-val-${name}').textContent=this.value"
+                                       onchange="setMover('${name}', {red: parseInt(this.value)})">
+                            </div>
+                            <div>
+                                <label style="font-size: 10px; color: #66ff66;">G: <span id="g-val-${name}">${green}</span></label>
+                                <input type="range" min="0" max="255" value="${green}" style="width: 100%; accent-color: #66ff66;"
+                                       oninput="document.getElementById('g-val-${name}').textContent=this.value"
+                                       onchange="setMover('${name}', {green: parseInt(this.value)})">
+                            </div>
+                            <div>
+                                <label style="font-size: 10px; color: #6666ff;">B: <span id="b-val-${name}">${blue}</span></label>
+                                <input type="range" min="0" max="255" value="${blue}" style="width: 100%; accent-color: #6666ff;"
+                                       oninput="document.getElementById('b-val-${name}').textContent=this.value"
+                                       onchange="setMover('${name}', {blue: parseInt(this.value)})">
+                            </div>
+                            <div>
+                                <label style="font-size: 10px; color: #ffffff;">W: <span id="w-val-${name}">${white}</span></label>
+                                <input type="range" min="0" max="255" value="${white}" style="width: 100%;"
+                                       oninput="document.getElementById('w-val-${name}').textContent=this.value"
+                                       onchange="setMover('${name}', {white: parseInt(this.value)})">
+                            </div>
+                        </div>
+                    `;
+                }
+
+                // Color buttons (only for non-RGBW movers)
+                let colorBtns = '';
+                if (!hasRgbw) {
+                    colorBtns = moverColors.map(c =>
+                        `<button onclick="setMover('${name}', {color: ${c.value}})"
+                                 style="width: 24px; height: 24px; background: ${c.css}; border: 2px solid ${colorVal >= c.value && colorVal < c.value + 8 ? 'white' : '#333'}; border-radius: 4px; cursor: pointer;"
+                                 title="${c.name}"></button>`
+                    ).join('');
+                }
                 
                 card.innerHTML = `
                     <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
-                        <span style="font-weight: 600;">${name.replace('FrontSpot', 'Front').replace('BigMover', 'Big')}</span>
+                        <span style="font-weight: 600;">${name.replace('FrontSpot', 'Front').replace('BigMover', 'Big').replace('ZoomWash_', 'Wash @')}</span>
                         <span style="font-size: 10px; color: var(--text-muted);">@${mover.dmx_address}</span>
                     </div>
-                    <div style="display: flex; gap: 4px; margin-bottom: 10px; flex-wrap: wrap;">
-                        ${colorBtns}
-                    </div>
+                    ${colorBtns ? `<div style="display: flex; gap: 4px; margin-bottom: 10px; flex-wrap: wrap;">${colorBtns}</div>` : ''}
+                    ${rgbwHtml}
                     <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px;">
                         <div>
                             <label style="font-size: 10px; color: var(--text-muted);">Pan: <span id="pan-val-${name}">${pan}</span></label>
@@ -1300,6 +1340,8 @@ class DMXOSCBridge:
                         "channels": fix_info.get("channels", 15),
                         "home_pan": fix_info.get("home_pan", 128),
                         "home_tilt": fix_info.get("home_tilt", 128),
+                        "has_zoom": fix_info.get("has_zoom", False),
+                        "has_rgbw": fix_info.get("has_rgbw", False),
                     }
                     # Initialize mover state
                     self.mover_state[name] = {
@@ -1308,6 +1350,10 @@ class DMXOSCBridge:
                         "dimmer": 0,
                         "zoom": 128,
                         "color": 0,
+                        "red": 255,
+                        "green": 255,
+                        "blue": 255,
+                        "white": 255,
                     }
                 else:
                     # Regular house light
@@ -1465,8 +1511,9 @@ class DMXOSCBridge:
             await self.set_all_house_lights(data["brightness"], data["color"])
         # Mover commands
         elif cmd == "set_mover":
-            await self.set_mover(data["name"], data.get("pan"), data.get("tilt"), 
-                                 data.get("dimmer"), data.get("zoom"), data.get("color"))
+            await self.set_mover(data["name"], data.get("pan"), data.get("tilt"),
+                                 data.get("dimmer"), data.get("zoom"), data.get("color"),
+                                 data.get("red"), data.get("green"), data.get("blue"), data.get("white"))
         elif cmd == "movers_to_character":
             await self._move_big_movers_to_character(data["character"])
         elif cmd == "movers_off":
@@ -2597,12 +2644,14 @@ class DMXOSCBridge:
     
     async def set_mover(self, name: str, pan: Optional[int] = None, tilt: Optional[int] = None,
                         dimmer: Optional[float] = None, zoom: Optional[int] = None,
-                        color: Optional[int] = None):
-        """Set mover position, brightness, and color."""
+                        color: Optional[int] = None, red: Optional[int] = None,
+                        green: Optional[int] = None, blue: Optional[int] = None,
+                        white: Optional[int] = None):
+        """Set mover position, brightness, color, and RGBW."""
         if name not in self.mover_channels:
             print(f"⚠️  Unknown mover: {name}")
             return
-        
+
         channel = self.mover_channels[name]
         info = self.movers[name]
         state = self.mover_state.get(name, {
@@ -2610,9 +2659,13 @@ class DMXOSCBridge:
             "tilt": info.get("home_tilt", 128),
             "dimmer": 0,
             "zoom": 128,
-            "color": 0
+            "color": 0,
+            "red": 255,
+            "green": 255,
+            "blue": 255,
+            "white": 255,
         })
-        
+
         # Update state with provided values
         if pan is not None:
             state["pan"] = pan
@@ -2624,7 +2677,15 @@ class DMXOSCBridge:
             state["zoom"] = zoom
         if color is not None:
             state["color"] = color
-        
+        if red is not None:
+            state["red"] = red
+        if green is not None:
+            state["green"] = green
+        if blue is not None:
+            state["blue"] = blue
+        if white is not None:
+            state["white"] = white
+
         self.mover_state[name] = state
         
         mover_type = info.get("type", "")
@@ -2662,6 +2723,24 @@ class DMXOSCBridge:
                 0,                  # Movement Macros
                 state["zoom"],      # Zoom
             ]
+        elif "Zoom Wash" in mover_type:
+            # Zoom Wash Mover 16ch: Pan, PanF, Tilt, TiltF, R, G, B, W, Dimmer, Shutter, Focus, ColorTemp, ColorFX, ColorFade, Speed, Prog
+            dmx_values = [
+                state["pan"], 0,                    # Ch 1-2: Pan, Pan Fine
+                state["tilt"], 0,                   # Ch 3-4: Tilt, Tilt Fine
+                state.get("red", 255),              # Ch 5: Red
+                state.get("green", 255),            # Ch 6: Green
+                state.get("blue", 255),             # Ch 7: Blue
+                state.get("white", 255),            # Ch 8: White
+                dimmer_val,                         # Ch 9: Dimmer
+                255 if dimmer_val > 0 else 0,       # Ch 10: Shutter (255=open)
+                state.get("zoom", 128),             # Ch 11: Focus (narrow-wide)
+                0,                                  # Ch 12: Color Temp
+                0,                                  # Ch 13: Color Effect
+                0,                                  # Ch 14: Color Fade
+                0,                                  # Ch 15: Pan/Tilt Speed (0=fast)
+                0,                                  # Ch 16: Programs
+            ]
         else:
             # Generic 16-channel mover
             dmx_values = [state["pan"], 0, state["tilt"], 0, 0, dimmer_val, 255, color_val, 0, 0, 0, 0, 0, 0, 0, 0]
@@ -2678,9 +2757,15 @@ class DMXOSCBridge:
                 "tilt": info.get("home_tilt", 128),
                 "dimmer": 0,
                 "zoom": 128,
-                "color": 0
+                "color": 0,
+                "red": 255,
+                "green": 255,
+                "blue": 255,
+                "white": 255,
             })
             mover_type = info.get("type", "")
+            has_zoom = info.get("has_zoom", False) or "375ZX" in mover_type or "Intimidator" in mover_type or "Zoom Wash" in mover_type
+            has_rgbw = info.get("has_rgbw", False)
             result[name] = {
                 "dmx_address": info["dmx_address"],
                 "type": mover_type,
@@ -2689,7 +2774,12 @@ class DMXOSCBridge:
                 "dimmer": state["dimmer"],
                 "zoom": state["zoom"],
                 "color": state.get("color", 0),
-                "has_zoom": "375ZX" in mover_type or "Intimidator" in mover_type,
+                "has_zoom": has_zoom,
+                "has_rgbw": has_rgbw,
+                "red": state.get("red", 255),
+                "green": state.get("green", 255),
+                "blue": state.get("blue", 255),
+                "white": state.get("white", 255),
             }
         return result
     
