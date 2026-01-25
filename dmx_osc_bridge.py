@@ -1686,7 +1686,7 @@ class DMXOSCBridge:
         
         # Enter async context and start refresh
         await self.artnet_node.__aenter__()
-        self.artnet_node.start_refresh()
+        await self.artnet_node.start_refresh()
         print(f"   ✅ Art-Net started, {len(self.dmx_channels)} character fixtures, {len(self.house_light_channels)} house fixtures")
     
     def _start_x32_client(self):
