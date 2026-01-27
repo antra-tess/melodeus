@@ -186,6 +186,8 @@ class ContextConfig:
     metadata: Optional[Dict[str, Any]] = None
     character_histories: Optional[Dict[str, str]] = None
     system_active_message: Optional[str] = None  # Message to inject after reset point when context becomes active
+    context_type: str = "file"  # "file" or "discord"
+    channel_id: Optional[str] = None  # For Discord contexts
 
 
 @dataclass
@@ -196,6 +198,59 @@ class ContextsConfig:
     state_dir: str = "./context_states"
     auto_save_enabled: bool = True
     auto_save_interval: int = 30  # seconds
+
+
+class ContextMode:
+    """Mode for context management - determines where inference happens."""
+    LOCAL = "local"  # Local LLM inference, Melodeus manages context
+    DISCORD = "discord"  # ChapterX handles inference, Discord is context source
+
+
+@dataclass
+class RelayBotConfig:
+    """Configuration for a bot in the relay system."""
+    name: str
+    user_id: str  # Discord user ID for @mention
+    voice_id: Optional[str] = None  # ElevenLabs voice ID for this bot
+    enabled: bool = True
+    aliases: List[str] = field(default_factory=list)
+
+
+@dataclass
+class RelaySpeakerConfig:
+    """Mapping from speaker name to Discord user info for webhook display."""
+    speaker_name: str  # Name from STT (e.g., "antra", "User 1")
+    discord_username: str  # Username to display in Discord
+    discord_user_id: Optional[str] = None  # Discord user ID (for avatar lookup)
+    avatar_url: Optional[str] = None  # Direct avatar URL
+    aliases: List[str] = field(default_factory=list)  # Alternative speaker names
+
+
+@dataclass
+class RelayWebhookConfig:
+    """Configuration for Discord webhook posting."""
+    bot_token: str  # Discord bot token for creating webhooks dynamically
+    username: str = "Melodeus"  # Display name in Discord
+    avatar_url: Optional[str] = None
+    include_speaker_name: bool = True  # Prefix messages with speaker name
+    mention_mode: str = "default"  # "default", "explicit", "round_robin", "last_speaker"
+
+
+@dataclass
+class RelayConfig:
+    """Configuration for Discord relay mode (ChapterX integration)."""
+    enabled: bool = False
+    url: str = ""  # WebSocket URL for relay server (e.g., "ws://localhost:8800")
+    client_id: str = "melodeus-1"  # Unique identifier for this client
+    token: str = ""  # Authentication token for relay
+    channels: List[str] = field(default_factory=list)  # Discord channel IDs to subscribe to
+    default_bot: Optional[str] = None  # Default bot to mention
+    bots: Dict[str, RelayBotConfig] = field(default_factory=dict)  # Bot configurations
+    speakers: Dict[str, RelaySpeakerConfig] = field(default_factory=dict)  # Speaker -> Discord user mappings
+    webhook: Optional[RelayWebhookConfig] = None  # Webhook config for posting STT
+    reconnect_interval: float = 5.0  # Seconds between reconnection attempts
+    auto_switch_on_connect: bool = False  # Auto-switch to DISCORD mode when relay connects
+
 
 @dataclass
 class VoiceAIConfig:
@@ -211,6 +266,7 @@ class VoiceAIConfig:
     echo_filter: Optional[EchoFilterConfig] = None
     osc: Optional[OSCConfig] = None
     contexts: Optional[ContextsConfig] = None
+    relay: Optional[RelayConfig] = None  # Discord relay mode configuration
     _raw_config: Dict[str, Any] = field(default_factory=dict)  # Store raw YAML for custom sections
 
 def deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
@@ -290,12 +346,11 @@ class ConfigLoader:
                 config_data = yaml.safe_load(f)
         except yaml.YAMLError as e:
             raise ValueError(f"Invalid YAML in config file: {e}")
-        
+
         # Apply preset overrides if specified
         if preset:
             preset_data = cls._load_preset(preset)
             config_data = deep_merge(config_data, preset_data)
-        
         # Validate and create configurations
         return cls._create_config(config_data)
     
@@ -608,7 +663,69 @@ class ConfigLoader:
                 auto_save_enabled=contexts_data.get('auto_save_enabled', True),
                 auto_save_interval=contexts_data.get('auto_save_interval', 30)
             )
-        
+
+        # Create relay configuration for Discord/ChapterX integration
+        relay_data = config_data.get('relay', {})
+        relay_config = None
+        if relay_data.get('enabled', False):
+            # Parse bot configurations
+            relay_bots = {}
+            bots_data = relay_data.get('bots', {})
+            for bot_name, bot_data in bots_data.items():
+                if isinstance(bot_data, dict):
+                    relay_bots[bot_name] = RelayBotConfig(
+                        name=bot_name,
+                        user_id=bot_data.get('user_id', ''),
+                        voice_id=bot_data.get('voice_id'),
+                        enabled=bot_data.get('enabled', True),
+                        aliases=bot_data.get('aliases', [])
+                    )
+                elif isinstance(bot_data, str):
+                    # Simple format: bot_name: user_id
+                    relay_bots[bot_name] = RelayBotConfig(
+                        name=bot_name,
+                        user_id=bot_data
+                    )
+
+            # Parse speaker mappings for webhook display
+            relay_speakers = {}
+            speakers_data = relay_data.get('speakers', {})
+            for speaker_name, speaker_data in speakers_data.items():
+                if isinstance(speaker_data, dict):
+                    relay_speakers[speaker_name] = RelaySpeakerConfig(
+                        speaker_name=speaker_name,
+                        discord_username=speaker_data.get('discord_username', speaker_name),
+                        discord_user_id=speaker_data.get('discord_user_id'),
+                        avatar_url=speaker_data.get('avatar_url'),
+                        aliases=speaker_data.get('aliases', [])
+                    )
+
+            # Parse webhook configuration
+            webhook_data = relay_data.get('webhook', {})
+            webhook_config = None
+            if webhook_data.get('bot_token'):
+                webhook_config = RelayWebhookConfig(
+                    bot_token=webhook_data['bot_token'],
+                    username=webhook_data.get('username', 'Melodeus'),
+                    avatar_url=webhook_data.get('avatar_url'),
+                    include_speaker_name=webhook_data.get('include_speaker_name', True),
+                    mention_mode=webhook_data.get('mention_mode', 'default')
+                )
+
+            relay_config = RelayConfig(
+                enabled=True,
+                url=relay_data.get('url', ''),
+                client_id=relay_data.get('client_id', 'melodeus-1'),
+                token=relay_data.get('token', ''),
+                channels=relay_data.get('channels', []),
+                default_bot=relay_data.get('default_bot'),
+                bots=relay_bots,
+                speakers=relay_speakers,
+                webhook=webhook_config,
+                reconnect_interval=relay_data.get('reconnect_interval', 5.0),
+                auto_switch_on_connect=relay_data.get('auto_switch_on_connect', False)
+            )
+
         config = VoiceAIConfig(
             conversation=conversation_config,
             stt=stt_config,
@@ -621,6 +738,7 @@ class ConfigLoader:
             echo_filter=echo_filter_config,
             osc=osc_config,
             contexts=contexts_config,
+            relay=relay_config,
             _raw_config=config_data  # Store raw config for custom sections like flic
         )
 

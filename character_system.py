@@ -39,7 +39,10 @@ class CharacterConfig:
     
     # Discord name (what other models see for this character's messages)
     discord_name: Optional[str] = None
-    
+
+    # Discord user ID (for mentioning this character's bot in relay mode)
+    discord_user_id: Optional[str] = None
+
     # Prefill name (deprecated, use inner_name/discord_name instead)
     prefill_name: Optional[str] = None
    

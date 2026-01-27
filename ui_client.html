@@ -487,7 +487,7 @@
         }
         
         .input-bar button:hover { background: #ff6b6b; }
-        
+
         /* TRANSCRIPT */
         .transcript-container {
             flex: 1;
@@ -632,8 +632,9 @@
                 </select>
                 <button class="sidebar-btn" onclick="resetContext()">🔄 Reset Context</button>
                 <button class="sidebar-btn" onclick="duplicateContext()">📋 Save as New Context</button>
+                <button class="sidebar-btn" id="save-discord-btn" onclick="saveDiscordAsLocal()" style="display:none;">💾 Save Discord as Local</button>
             </div>
-            
+
             <div class="sidebar-section">
                 <h3>Controls</h3>
                 <div class="toggle-row">
@@ -648,6 +649,11 @@
                     <span>Interruptions</span>
                     <div class="toggle-switch" id="interruptions-toggle" onclick="toggleInterruptions()"></div>
         </div>
+                <!-- Discord Mode is now automatic based on context type -->
+                <div class="toggle-row" id="discord-mode-row" style="display:none;">
+                    <span>Discord Mode</span>
+                    <div class="toggle-switch" id="context-mode-toggle" onclick="toggleContextMode()"></div>
+                </div>
                 <button class="sidebar-btn danger" onclick="forceInterrupt()">🛑 Force Interrupt</button>
                 <button class="sidebar-btn" onclick="resetFingerprints()">🔄 Reset Voices</button>
                 <button class="sidebar-btn warning" onclick="restartServer()">🔃 Restart Server</button>
@@ -854,11 +860,19 @@
                 case 'context_switched':
                     updateActiveContext(msg.data);
                     break;
+                case 'context_mode_change':
+                    contextMode = msg.data.mode || 'local';
+                    updateContextModeToggle();
+                    console.log(`Context mode changed to: ${contextMode}`);
+                    break;
                 case 'context_duplicated':
                     alert(`Created new context: ${msg.data.new_context}`);
                     break;
                 case 'context_deleted':
                     console.log(`Deleted context: ${msg.data.context_name}`);
+                    break;
+                case 'discord_context_saved':
+                    alert(`Saved Discord context as: ${msg.data.new_context}`);
                     break;
                 case 'learned_speakers':
                     learnedSpeakers = msg.data.speakers || [];
@@ -1302,14 +1316,70 @@
             }
             const selector = document.getElementById('context-selector');
             selector.innerHTML = '';
+
             if (data.contexts) {
-                data.contexts.forEach(ctx => {
-                    const opt = document.createElement('option');
-                    opt.value = ctx.name;
-                    opt.textContent = ctx.name;
-                    if (ctx.is_active) opt.selected = true;
-                    selector.appendChild(opt);
-                });
+                // Separate contexts by type
+                const fileContexts = data.contexts.filter(c => c.context_type !== 'discord');
+                const discordContexts = data.contexts.filter(c => c.context_type === 'discord');
+
+                // Add file contexts group
+                if (fileContexts.length > 0) {
+                    const fileGroup = document.createElement('optgroup');
+                    fileGroup.label = '📁 File Contexts';
+                    fileContexts.forEach(ctx => {
+                        const opt = document.createElement('option');
+                        opt.value = ctx.name;
+                        opt.textContent = ctx.name;
+                        if (ctx.is_active) opt.selected = true;
+                        fileGroup.appendChild(opt);
+                    });
+                    selector.appendChild(fileGroup);
+                }
+
+                // Add Discord channels group
+                if (discordContexts.length > 0) {
+                    const discordGroup = document.createElement('optgroup');
+                    discordGroup.label = '💬 Discord Channels';
+                    discordContexts.forEach(ctx => {
+                        const opt = document.createElement('option');
+                        opt.value = ctx.name;
+                        // Show availability status
+                        if (ctx.available) {
+                            opt.textContent = ctx.name.replace('discord_', '#');
+                        } else {
+                            // Show offline but keep clickable - clicking will trigger connection
+                            opt.textContent = ctx.name.replace('discord_', '#') + ' (offline - click to connect)';
+                            opt.style.color = '#888';
+                        }
+                        if (ctx.is_active) opt.selected = true;
+                        discordGroup.appendChild(opt);
+                    });
+                    selector.appendChild(discordGroup);
+                }
+
+                // Update save button visibility based on active context type
+                const activeCtx = data.contexts.find(c => c.is_active);
+                updateSaveAsLocalButton(activeCtx);
+            }
+        }
+
+        function updateSaveAsLocalButton(activeContext) {
+            const saveBtn = document.getElementById('save-discord-btn');
+            if (saveBtn) {
+                // Show button only for Discord contexts
+                saveBtn.style.display = (activeContext && activeContext.context_type === 'discord') ? 'block' : 'none';
+            }
+        }
+
+        function saveDiscordAsLocal() {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                const customName = prompt('Enter name for saved context (leave empty for auto-generated):');
+                if (customName !== null) {
+                    ws.send(JSON.stringify({
+                        type: 'save_discord_context',
+                        data: { new_name: customName || null }
+                    }));
+                }
             }
         }
         
@@ -1404,7 +1474,27 @@
                 toggle.classList.remove('on');
             }
         }
-        
+
+        // Context mode toggle (local vs discord)
+        let contextMode = 'local';
+
+        function toggleContextMode() {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({
+                    type: 'toggle_context_mode'
+                }));
+            }
+        }
+
+        function updateContextModeToggle() {
+            const toggle = document.getElementById('context-mode-toggle');
+            if (contextMode === 'discord') {
+                toggle.classList.add('on');
+            } else {
+                toggle.classList.remove('on');
+            }
+        }
+
         function forceInterrupt() {
             if (ws && ws.readyState === WebSocket.OPEN) {
                 ws.send(JSON.stringify({ type: 'force_interrupt' }));
@@ -1592,14 +1682,14 @@
             const textInput = document.getElementById('text-input');
             const speaker = speakerInput.value.trim() || 'USER';
             const text = textInput.value.trim();
-            
+
             if (!text || !ws || ws.readyState !== WebSocket.OPEN) return;
-            
-                ws.send(JSON.stringify({
-                    type: 'send_text_message',
+
+            ws.send(JSON.stringify({
+                type: 'send_text_message',
                 data: { speaker_name: speaker, text: text }
-                }));
-                textInput.value = '';
+            }));
+            textInput.value = '';
         }
         
         function editMessage(msgId) {

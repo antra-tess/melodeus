@@ -272,7 +272,39 @@ class AsyncSTTElevenLabs:
             
             elif msg_type == "partial_transcript":
                 text = data.get("text", "")
+                # Check for any segment/turn identifiers ElevenLabs might send
+                segment_id = data.get("segment_id") or data.get("turn_id") or data.get("id") or data.get("utterance_id")
+                
+                # Always log partials to debug the reset issue
+                seg_info = f" [seg:{segment_id}]" if segment_id else ""
+                print(f"📝 Partial{seg_info}: '{text}'")
+                
                 if text:
+                    # Detect regression (new partial is much shorter or doesn't start the same)
+                    prev_partial = self.current_partial_text
+                    is_regression = False
+                    
+                    if prev_partial:
+                        # Check if this looks like a fresh start vs continuation
+                        prev_words = prev_partial.lower().split()
+                        new_words = text.lower().split()
+                        
+                        # Regression if: much shorter AND doesn't share starting words
+                        if len(text) < len(prev_partial) * 0.7 and len(new_words) > 0 and len(prev_words) > 0:
+                            # Check if new text is a continuation (shares prefix)
+                            shares_prefix = prev_partial.lower().startswith(text.lower()[:min(20, len(text))])
+                            if not shares_prefix and not prev_partial.lower().endswith(text.lower()[:min(10, len(text))]):
+                                is_regression = True
+                    
+                    if is_regression:
+                        print(f"⚠️  PARTIAL RESET DETECTED!")
+                        print(f"    Was: '{prev_partial}'")
+                        print(f"    Now: '{text}'")
+                        print(f"    Full message: {json.dumps(data)}")
+                        # Check if previous was committed
+                        if self._has_meaningful_change(prev_partial, self.last_committed_text):
+                            print(f"    ❌ Previous was NOT committed - speech lost!")
+                    
                     self.current_partial_text = text
                     self.turn_history.append((time.time(), text))
                     
@@ -294,10 +326,13 @@ class AsyncSTTElevenLabs:
             
             elif msg_type == "committed_transcript":
                 text = data.get("text", "")
+                print(f"✅ Committed: '{text}' (prev partial was: '{self.current_partial_text}')")
                 if text and self._has_meaningful_change(text, self.last_committed_text):
                     await self._emit_final_result(text, data)
                     self.last_committed_text = text
                     self._reset_turn_state()
+                else:
+                    print(f"    (skipped - already committed or no change)")
             
             elif msg_type == "committed_transcript_with_timestamps":
                 text = data.get("text", "")
@@ -308,10 +343,13 @@ class AsyncSTTElevenLabs:
                     # Log detected language (useful for multilingual conversations)
                     print(f"🌐 Detected language: {language}")
                 
+                print(f"✅ Committed (w/timestamps): '{text}' (prev partial was: '{self.current_partial_text}')")
                 if text and self._has_meaningful_change(text, self.last_committed_text):
                     await self._emit_final_result(text, data, words=words)
                     self.last_committed_text = text
                     self._reset_turn_state()
+                else:
+                    print(f"    (skipped - already committed or no change)")
             
             elif msg_type in ("error", "auth_error", "quota_exceeded", "throttled", 
                              "rate_limited", "transcriber_error"):
@@ -321,6 +359,14 @@ class AsyncSTTElevenLabs:
                     "error": error_msg,
                     "type": msg_type
                 })
+            
+            elif msg_type in ("segment_started", "segment_ended", "turn_started", "turn_ended"):
+                # Lifecycle events - log for debugging turn boundary issues
+                print(f"📍 ElevenLabs lifecycle: {msg_type} - {data}")
+            
+            elif msg_type and msg_type not in ("ping", "pong"):
+                # Unknown message type - log for investigation
+                print(f"❓ Unknown ElevenLabs message type: {msg_type} - {json.dumps(data)[:200]}")
             
         except json.JSONDecodeError as e:
             print(f"⚠️  Failed to parse ElevenLabs message: {e}")

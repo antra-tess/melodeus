@@ -253,6 +253,15 @@ class VoiceUIServer:
                 enabled = data.get("enabled", True)
                 await self.handle_set_mute_while_speaking(enabled)
 
+            elif msg_type == "toggle_context_mode":
+                # Toggle between local and discord context modes
+                await self.handle_toggle_context_mode()
+
+            elif msg_type == "save_discord_context":
+                # Save current Discord context as a local file context
+                new_name = data.get("new_name")
+                await self.handle_save_discord_context(new_name)
+
             else:
                 await self.send_error(websocket, f"Unknown message type: {msg_type}")
                 
@@ -376,7 +385,36 @@ class VoiceUIServer:
         if not self.conversation:
             return
 
-        # Validate that the speaker exists
+        print(f"🎯 handle_trigger_speaker: {speaker}, discord_mode={self.conversation.is_discord_mode()}")
+
+        # Check if in Discord mode - route to Discord instead of local LLM
+        if self.conversation.is_discord_mode():
+            # Get the character's discord_user_id
+            char_config = self.conversation.character_manager.get_character_config(speaker)
+            discord_user_id = None
+            if char_config:
+                discord_user_id = getattr(char_config, 'discord_user_id', None)
+
+            if discord_user_id:
+                print(f"🎯 Triggering Discord bot for {speaker} (ID: {discord_user_id})")
+                # Post a mention to Discord to trigger the bot
+                if self.conversation.relay_manager and self.conversation.relay_manager._webhook_poster:
+                    # Get channel from relay config
+                    channel_id = None
+                    if self.conversation.config.relay and self.conversation.config.relay.channels:
+                        channel_id = self.conversation.config.relay.channels[0]
+                    if channel_id:
+                        await self.conversation.relay_manager._webhook_poster.post_mention(
+                            user_id=discord_user_id,
+                            channel_id=channel_id
+                        )
+                    else:
+                        print("⚠️ No Discord channel configured")
+            else:
+                print(f"⚠️ Character {speaker} has no discord_user_id configured")
+            return
+
+        # Validate that the speaker exists (for local mode)
         if not self.conversation.character_manager.get_character_config(speaker):
             print(f"❌ Cannot trigger unknown character: {speaker}")
             await self.broadcast_error(f"Unknown character: {speaker}")
@@ -603,7 +641,15 @@ class VoiceUIServer:
                 type="available_characters",
                 data={"characters": characters}
             ))
-        
+
+        # Send context mode state
+        if self.conversation:
+            context_mode = self.conversation.get_context_mode()
+            await self.send_to_client(websocket, UIMessage(
+                type="context_mode_change",
+                data={"mode": context_mode}
+            ))
+
     async def send_to_client(self, client: websockets.WebSocketServerProtocol, message: UIMessage):
         """Send message to specific client."""
         try:
@@ -850,23 +896,39 @@ class VoiceUIServer:
         """Handle message edit request."""
         if not self.conversation or not msg_id or not new_text:
             return
-            
+
         try:
             # Extract index from msg_id (format: "msg_123")
             index = int(msg_id.split('_')[1])
-            
+
             if 0 <= index < len(self.conversation.state.conversation_history):
                 turn = self.conversation.state.conversation_history[index]
                 # Update the message content for any role
                 old_text = turn.content
                 turn.content = new_text
                 print(f"✏️ Edited message {msg_id} ({turn.role}): '{old_text}' → '{new_text}'")
-                
+
+                # If this turn has Discord message info, edit it there too
+                if turn.metadata and turn.metadata.get("discord_message_id"):
+                    if hasattr(self.conversation, 'relay_manager') and self.conversation.relay_manager:
+                        webhook_poster = self.conversation.relay_manager._webhook_poster
+                        if webhook_poster:
+                            success = await webhook_poster.edit_webhook_message(
+                                message_id=turn.metadata["discord_message_id"],
+                                webhook_id=turn.metadata["discord_webhook_id"],
+                                webhook_token=turn.metadata["discord_webhook_token"],
+                                new_content=new_text
+                            )
+                            if success:
+                                print(f"   ✅ Also edited Discord message {turn.metadata['discord_message_id']}")
+                            else:
+                                print(f"   ⚠️ Failed to edit Discord message (local edit kept)")
+
                 # Update conversation log file if it exists
                 if hasattr(self.conversation, '_log_conversation_turn'):
                     # Re-log the edited turn
                     self.conversation._log_conversation_turn(turn.role, new_text)
-                
+
                 # Broadcast the edit to all clients
                 update_data = {
                     "id": msg_id,
@@ -880,7 +942,7 @@ class VoiceUIServer:
                     self.conversation._save_conversation_state()
             else:
                 await self.send_error(None, f"Invalid message ID: {msg_id}")
-                
+
         except Exception as e:
             self.logger.error(f"Error editing message: {e}")
             await self.send_error(None, str(e))
@@ -1121,12 +1183,12 @@ class VoiceUIServer:
         """Handle text message from UI."""
         if not self.conversation or not text.strip():
             return
-            
+
         print(f"💬 Text message from {speaker_name}: {text}")
-        
+
         # Create a synthetic transcription result
         from dataclasses import dataclass
-        
+
         @dataclass
         class SyntheticTranscriptionResult:
             text: str
@@ -1142,7 +1204,7 @@ class VoiceUIServer:
             is_edit: bool = False  # Whether this is editing an existing message
             audio_window_start: int = None  # For audio archiving (not used for text input)
             audio_window_end: int = None  # For audio archiving (not used for text input)
-            
+
         # Create a result that looks like it came from STT
         result = SyntheticTranscriptionResult(
             text=text,
@@ -1153,12 +1215,12 @@ class VoiceUIServer:
             confidence=1.0,
             raw_data={}
         )
-        
+
         # Add the speaker to detected_speakers so they become a stop sequence
         if hasattr(self.conversation, 'detected_speakers') and speaker_name:
             self.conversation.detected_speakers.add(speaker_name)
             print(f"📝 Added '{speaker_name}' to detected speakers for stop sequences")
-        
+
         # Process through the conversation system
         if hasattr(self.conversation, '_on_utterance_complete'):
             await self.conversation._on_utterance_complete(result)
@@ -1193,7 +1255,25 @@ class VoiceUIServer:
             type="state_sync",
             data=self.current_state
         ))
-    
+
+    async def handle_toggle_context_mode(self):
+        """Toggle between local and discord context modes."""
+        print(f"🔄 handle_toggle_context_mode called")
+        if not self.conversation:
+            print("❌ Cannot toggle context mode: conversation not initialized")
+            return
+
+        print(f"🔄 relay_manager = {self.conversation.relay_manager}")
+        # Toggle the mode
+        new_mode = await self.conversation.toggle_context_mode()
+        print(f"🔄 Context mode toggled to: {new_mode}")
+
+        # Broadcast the update to all clients
+        await self.broadcast(UIMessage(
+            type="context_mode_change",
+            data={"mode": new_mode}
+        ))
+
     async def handle_get_contexts(self, websocket):
         """Get list of available contexts."""
         if not self.conversation:
@@ -1309,6 +1389,51 @@ class VoiceUIServer:
             self.logger.error(f"Error deleting context: {e}")
             await self.broadcast_error(str(e))
 
+    async def handle_save_discord_context(self, new_name: str = None):
+        """Save current Discord context as a local file context."""
+        if not self.conversation or not self.conversation.context_manager:
+            await self.broadcast_error("Context manager not available")
+            return
+
+        try:
+            # Get the active context
+            active_context = self.conversation.context_manager.get_active_context()
+            if not active_context:
+                await self.broadcast_error("No active context")
+                return
+
+            # Check if it's a Discord context
+            if not active_context.is_discord_context():
+                await self.broadcast_error("Current context is not a Discord context")
+                return
+
+            # Save as local file context
+            result_name = self.conversation.context_manager.save_discord_context_as_file(
+                discord_context_name=active_context.config.name,
+                new_name=new_name
+            )
+
+            if result_name:
+                # Broadcast context list update to all clients
+                contexts = self.conversation.get_context_list()
+                msg = UIMessage("contexts_list", {"contexts": contexts})
+                await self.broadcast(msg)
+
+                # Notify about the new context
+                msg = UIMessage("discord_context_saved", {
+                    "new_context": result_name,
+                    "message": f"Saved Discord context as '{result_name}'"
+                })
+                await self.broadcast(msg)
+
+                print(f"💾 Saved Discord context as '{result_name}'")
+            else:
+                await self.broadcast_error("Failed to save Discord context")
+
+        except Exception as e:
+            self.logger.error(f"Error saving Discord context: {e}")
+            await self.broadcast_error(str(e))
+
     async def handle_restart(self):
         """Restart the melodeus server by spawning a new process and exiting."""
         print("🔄 Restart requested from UI...")
@@ -1369,7 +1494,10 @@ class VoiceUIServer:
         if self.conversation and hasattr(self.conversation, 'config'):
             self.conversation.config.conversation.director_mode = mode
             self.conversation.config.conversation.director_enabled = (mode != "off")
-        
+            # Save global settings to persist across restarts
+            if hasattr(self.conversation, '_save_global_settings'):
+                self.conversation._save_global_settings()
+
         # Broadcast the update to all clients
         await self.broadcast(UIMessage(
             type="director_mode_changed",

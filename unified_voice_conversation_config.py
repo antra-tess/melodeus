@@ -35,6 +35,7 @@ from tool_parser import (
     inject_tools_into_system, get_tool_stop_sequence, get_eot_token, parse_tool_calls,
     format_tool_results, has_unclosed_tool_block, ToolDefinition, ToolResult as ParsedToolResult
 )
+from relay_mode_manager import RelayModeManager, ContextMode, create_relay_manager
 
 INTERRUPTED_STR = "[Interrupted by user]"
 
@@ -103,7 +104,13 @@ class UnifiedVoiceConversation:
         # Removed _processing_generation - using state.current_generation instead
         # Track director requests separately
         self._director_generation = 0
-        
+
+        # Discord message polling
+        self._discord_poll_task: Optional[asyncio.Task] = None
+        self._discord_poll_interval = 3.0  # seconds between polls
+        self._last_seen_message_ids: Dict[str, str] = {}  # channel_id -> last_message_id
+        self._tts_received_hashes: set = set()  # Track messages received via TTS to avoid duplicates
+
         # Debounce timer for utterance processing (wait for multiple utterances)
         self._utterance_debounce_timer = None
         self._utterance_debounce_task = None
@@ -196,6 +203,21 @@ class UnifiedVoiceConversation:
                     on_trigger=self._flic_trigger_character
                 )
                 print(f"🎮 Flic button listener configured on port {flic_config.port}")
+
+        # Initialize relay mode manager for Discord/ChapterX integration
+        self.relay_manager: Optional[RelayModeManager] = create_relay_manager(config)
+        if self.relay_manager:
+            # Set up callbacks for activation lifecycle (thinking sound control)
+            self.relay_manager.set_on_activation_start(self._on_relay_activation_start)
+            self.relay_manager.set_on_activation_end(self._on_relay_activation_end)
+            # Set up callbacks for TTS streaming
+            self.relay_manager.set_on_tts_stream_start(self._on_relay_tts_start)
+            self.relay_manager.set_on_tts_stream_end(self._on_relay_tts_end)
+            # Set up callback for relay connection state changes (to update UI)
+            self.relay_manager.set_on_relay_connection_change(self._on_relay_connection_change)
+            print(f"🔗 Relay mode manager initialized (Discord context available)")
+        else:
+            print("🔗 Relay mode not configured (local context only)")
 
         # Initialize character manager (always use character mode)
         characters_config = {
@@ -315,6 +337,10 @@ class UnifiedVoiceConversation:
         self.conversation_logs_dir = Path("conversation_logs")
         self.conversation_logs_dir.mkdir(exist_ok=True)
         
+        # Global settings file for director_mode and current_context (persists across restarts)
+        self._settings_file = self.conversation_logs_dir / "melodeus_settings.json"
+        self._load_global_settings()
+
         state_file = getattr(self.config.conversation, "state_file", None)
         self._explicit_state_file = bool(state_file)
         if state_file:
@@ -637,6 +663,18 @@ class UnifiedVoiceConversation:
     
     def _serialize_conversation_state(self) -> Dict[str, Any]:
         """Build a JSON representation of the current conversation state."""
+        # Get current context name
+        current_context_name = None
+        if self.context_manager:
+            active_ctx = self.context_manager.get_active_context()
+            if active_ctx:
+                current_context_name = active_ctx.name
+
+        # Get director mode
+        director_mode = getattr(self.config.conversation, 'director_mode', None)
+        if director_mode is None:
+            director_mode = "director" if self.config.conversation.director_enabled else "off"
+
         return {
             "conversation_history": [
                 self._serialize_conversation_turn(turn)
@@ -655,6 +693,8 @@ class UnifiedVoiceConversation:
             },
             "current_processing_turn_index": self._get_current_processing_turn_index(),
             "saved_at": datetime.now().isoformat(),
+            "director_mode": director_mode,
+            "current_context": current_context_name,
         }
     
     def _save_conversation_state(self):
@@ -699,21 +739,21 @@ class UnifiedVoiceConversation:
         """Load persisted conversation state from JSON if available."""
         if not hasattr(self, "conversation_state_file") or not self.conversation_state_file:
             return
-        
+
         if not self.conversation_state_file.exists():
             return
-        
+
         try:
             with open(self.conversation_state_file, 'r', encoding='utf-8') as f:
                 data = json.load(f)
-            
+
             history_data = data.get("conversation_history", [])
             if not history_data:
                 return
-            
+
             loaded_turns = [self._deserialize_conversation_turn(item) for item in history_data]
             self.state.conversation_history = loaded_turns
-            
+
             state_data = data.get("state", {})
             self.state.current_generation = state_data.get("current_generation", 0)
             self.state.request_generation = state_data.get("request_generation", 0)
@@ -723,22 +763,81 @@ class UnifiedVoiceConversation:
             self.state.last_ai_speaker = state_data.get("last_ai_speaker")
             self.state.is_processing_llm = False
             self.state.is_speaking = False
-            
+
             idx = data.get("current_processing_turn_index")
             if isinstance(idx, int) and 0 <= idx < len(self.state.conversation_history):
                 self.state.current_processing_turn = self.state.conversation_history[idx]
             else:
                 self.state.current_processing_turn = None
-            
+
+            # Restore director mode
+            saved_director_mode = data.get("director_mode")
+            if saved_director_mode:
+                self.config.conversation.director_mode = saved_director_mode
+                print(f"💾 Restored director mode: {saved_director_mode}")
+
+            # Store context to restore after startup (context_manager may not be ready yet)
+            self._pending_context_restore = data.get("current_context")
+
             self._rebuild_detected_speakers_from_history()
             self._sync_history_to_context()
-            
+
             print(f"💾 Restored {len(loaded_turns)} turns from {self.conversation_state_file}")
         except Exception as e:
             print(f"⚠️ Failed to load conversation state: {e}")
             if hasattr(self, "logger"):
                 self.logger.error(f"Failed to load conversation state: {e}")
-    
+
+    def _load_global_settings(self):
+        """Load global settings (director_mode, current_context) from file."""
+        if not self._settings_file.exists():
+            return
+
+        try:
+            with open(self._settings_file, 'r', encoding='utf-8') as f:
+                settings = json.load(f)
+
+            # Restore director mode
+            saved_director_mode = settings.get("director_mode")
+            if saved_director_mode:
+                self.config.conversation.director_mode = saved_director_mode
+                print(f"💾 Restored director mode: {saved_director_mode}")
+
+            # Store context to restore after startup
+            self._pending_context_restore = settings.get("current_context")
+            if self._pending_context_restore:
+                print(f"💾 Will restore context: {self._pending_context_restore}")
+
+        except Exception as e:
+            print(f"⚠️ Failed to load global settings: {e}")
+
+    def _save_global_settings(self):
+        """Save global settings (director_mode, current_context) to file."""
+        try:
+            # Get current context name
+            current_context_name = None
+            if self.context_manager:
+                active_ctx = self.context_manager.get_active_context()
+                if active_ctx:
+                    current_context_name = active_ctx.name
+
+            # Get director mode
+            director_mode = getattr(self.config.conversation, 'director_mode', None)
+            if director_mode is None:
+                director_mode = "director" if self.config.conversation.director_enabled else "off"
+
+            settings = {
+                "director_mode": director_mode,
+                "current_context": current_context_name,
+                "saved_at": datetime.now().isoformat(),
+            }
+
+            with open(self._settings_file, 'w', encoding='utf-8') as f:
+                json.dump(settings, f, indent=2)
+
+        except Exception as e:
+            print(f"⚠️ Failed to save global settings: {e}")
+
     def _setup_stt_keywords(self, config: VoiceAIConfig):
         """Setup STT keywords including character names."""
         keywords = []
@@ -1415,9 +1514,28 @@ class UnifiedVoiceConversation:
             if self.flic_listener:
                 await self.flic_listener.start()
 
+            # Start relay mode manager if configured
+            if self.relay_manager:
+                await self.relay_manager.start()
+                self.relay_manager.set_on_mode_change(self._on_context_mode_change)
+                self.relay_manager.set_on_tts_stream_start(self._on_relay_tts_start)
+                self.relay_manager.set_on_tts_stream_end(self._on_relay_tts_end)
+                print(f"🔗 Relay mode ready (use /mode to switch between local/discord)")
+
+                # Initialize Discord channel contexts
+                await self._initialize_discord_channel_contexts()
+
             # Start context auto-save if enabled
             if self.context_manager:
                 await self.context_manager.start_auto_save()
+
+            # Restore saved context if any
+            if hasattr(self, '_pending_context_restore') and self._pending_context_restore:
+                saved_context = self._pending_context_restore
+                self._pending_context_restore = None
+                if self.context_manager and saved_context in self.context_manager.contexts:
+                    print(f"💾 Restoring saved context: {saved_context}")
+                    await self.switch_context(saved_context)
 
             print("✅ Conversation system active!")
             print("💡 Tips:")
@@ -1458,7 +1576,8 @@ class UnifiedVoiceConversation:
         print("🛑 Stopping conversation...")
         self.state.is_active = False
         self._save_conversation_state()
-        
+        self._save_global_settings()
+
         # Cancel conversation management
         if self.conversation_task and not self.conversation_task.done():
             self.conversation_task.cancel()
@@ -1478,7 +1597,11 @@ class UnifiedVoiceConversation:
         if self.context_manager:
             await self.context_manager.stop_auto_save()
             self.context_manager.save_all_states()
-        
+
+        # Stop relay mode manager
+        if self.relay_manager:
+            await self.relay_manager.stop()
+
         print("✅ Conversation stopped")
     
     def _get_spoken_text_with_fallback(self, candidate: str = "") -> str:
@@ -1531,7 +1654,11 @@ class UnifiedVoiceConversation:
     async def _stop_tts_and_notify_ui(self) -> str:
         """Stop TTS playback and update the UI with any spoken content."""
         interrupted_text = await self.tts.interrupt()
-        
+
+        # Send interruption to relay if in Discord mode
+        if self.is_discord_mode() and self.relay_manager:
+            await self.relay_manager.send_interruption("user_speech")
+
         if hasattr(self, 'ui_server'):
             session_id = getattr(self.state, "current_ui_session_id", None)
             if session_id:
@@ -1544,7 +1671,7 @@ class UnifiedVoiceConversation:
                     }
                 ))
                 print(f"🔄 Sent AI stream correction for session '{session_id}'")
-        
+
         return interrupted_text
     
 
@@ -1858,6 +1985,368 @@ class UnifiedVoiceConversation:
         # Then trigger the character
         await self._get_llm_output(character)
 
+    # ==================== Relay Mode Methods ====================
+
+    async def _on_context_mode_change(self, mode: ContextMode):
+        """Handle context mode change from relay manager."""
+        mode_str = "DISCORD" if mode == ContextMode.DISCORD else "LOCAL"
+        print(f"🔄 Context mode changed to: {mode_str}")
+
+        # Broadcast to UI
+        if hasattr(self, 'ui_server'):
+            await self.ui_server.broadcast(UIMessage(
+                type="context_mode_change",
+                data={"mode": mode.value}
+            ))
+
+    async def _on_relay_activation_start(self, bot_id: str, channel_id: str):
+        """Handle activation start from relay - bot has started thinking."""
+        print(f"🤔 Bot {bot_id} is thinking...")
+
+        # Start thinking sound
+        if hasattr(self, 'ui_server'):
+            await self.ui_server.broadcast_speaker_status(
+                thinking_sound=True,
+                is_speaking=False,
+                is_processing=True,
+                pending_speaker=bot_id
+            )
+
+    async def _on_relay_activation_end(self, bot_id: str, channel_id: str, reason: str):
+        """Handle activation end from relay - bot has finished thinking."""
+        print(f"✅ Bot {bot_id} finished thinking ({reason})")
+
+        # Always stop thinking sound on activation end
+        # TTS start callback will set the appropriate speaking state if TTS follows
+        if hasattr(self, 'ui_server'):
+            await self.ui_server.broadcast_speaker_status(
+                thinking_sound=False,
+                is_speaking=False,
+                is_processing=False,
+                current_speaker=None
+            )
+
+    async def _on_relay_tts_start(self, bot_id: str, channel_id: str):
+        """Handle start of TTS streaming from relay."""
+        print(f"🔊 Relay TTS starting from {bot_id}")
+        self.state.is_speaking = True
+
+        # Stop thinking sound, start speaking
+        if hasattr(self, 'ui_server'):
+            await self.ui_server.broadcast_speaker_status(
+                thinking_sound=False,
+                is_speaking=True,
+                is_processing=False,
+                current_speaker=bot_id
+            )
+
+        # Get voice config for this bot and start TTS streaming
+        if self.relay_manager:
+            voice_id = self.relay_manager.get_voice_id_for_bot(bot_id)
+            print(f"🔊 DEBUG: voice_id for {bot_id} = {voice_id}")
+            if voice_id:
+                # Switch TTS voice to match the bot
+                self.tts.config.voice_id = voice_id
+
+            # Get the TTS stream from relay
+            tts_stream = self.relay_manager.get_tts_stream()
+            print(f"🔊 DEBUG: tts_stream = {tts_stream}")
+            if tts_stream:
+                # Start TTS playback as background task
+                print(f"🔊 DEBUG: Starting TTS task for {bot_id}")
+                self._relay_tts_task = asyncio.create_task(
+                    self._play_relay_tts(tts_stream, bot_id)
+                )
+            else:
+                print(f"❌ DEBUG: No TTS stream available for {bot_id}")
+
+    async def _play_relay_tts(self, text_stream, bot_id: str):
+        """Play TTS from relay stream while broadcasting chunks to UI."""
+        print(f"🔊 DEBUG: _play_relay_tts started for {bot_id}")
+
+        # Generate a session ID for this streaming session
+        ui_session_id = f"relay_{bot_id}_{id(text_stream)}"
+
+        # Wrapper generator that broadcasts to UI while yielding to TTS
+        async def stream_with_ui_broadcast():
+            async for chunk in text_stream:
+                # Broadcast chunk to UI for real-time display
+                if hasattr(self, 'ui_server') and chunk:
+                    await self.ui_server.broadcast_ai_stream(
+                        speaker=bot_id,
+                        text=chunk,
+                        session_id=ui_session_id
+                    )
+                yield chunk
+
+        try:
+            result = await self.tts.speak_text(
+                stream_with_ui_broadcast(),
+                None,  # first_audio_callback
+                self.osc_client,
+                self.config.osc.speaking_start_address,
+                None,  # message_id
+                character_name=bot_id
+            )
+            print(f"🔊 DEBUG: _play_relay_tts finished for {bot_id}, result={result}")
+        except asyncio.CancelledError:
+            print(f"🔊 Relay TTS cancelled for {bot_id}")
+        except Exception as e:
+            import traceback
+            print(f"❌ Relay TTS error: {e}")
+            traceback.print_exc()
+
+    async def _on_relay_tts_end(self, bot_id: str, channel_id: str, content: str):
+        """Handle end of TTS streaming from relay."""
+        if content.strip():
+            print(f"🔊 Relay TTS complete from {bot_id}: {content[:50]}...")
+        else:
+            print(f"⚠️ Relay TTS complete from {bot_id} but content was EMPTY")
+        self.state.is_speaking = False
+
+        # Add the bot's response to conversation history
+        if content.strip():
+            # Track this message to avoid duplicating from polling
+            content_hash = hash((bot_id, content.strip()[:200]))  # Use first 200 chars for hash
+            self._tts_received_hashes.add(content_hash)
+
+            message_id = f"msg_{len(self.state.conversation_history)}"
+
+            assistant_turn = ConversationTurn(
+                role="assistant",
+                content=content,
+                timestamp=datetime.now(),
+                status="completed",
+                character=bot_id,
+                speaker_name=bot_id,
+                id=message_id,
+                metadata={"source": "discord_relay", "channel_id": channel_id}
+            )
+
+            # Add to history
+            self._add_turn_to_history(assistant_turn)
+
+            # Broadcast to UI
+            if hasattr(self, 'ui_server'):
+                await self.ui_server.broadcast_ai_stream(
+                    speaker=bot_id,
+                    text=content,
+                    is_complete=True,
+                    session_id=message_id,
+                    message_id=message_id
+                )
+
+            # Also add to active context if in Discord mode
+            if self.context_manager:
+                active_context = self.context_manager.get_active_context()
+                if active_context and active_context.is_discord_context():
+                    # Import the context_manager's ConversationTurn
+                    from context_manager import ConversationTurn as ContextTurn
+                    ctx_turn = ContextTurn(
+                        role="assistant",
+                        content=content,
+                        timestamp=datetime.now(),
+                        status="completed",
+                        character=bot_id,
+                        speaker_name=bot_id,
+                        metadata={"source": "discord_relay", "channel_id": channel_id}
+                    )
+                    active_context.add_turn(ctx_turn)
+
+        # Clear speaking status
+        if hasattr(self, 'ui_server'):
+            await self.ui_server.broadcast_speaker_status(
+                thinking_sound=False,
+                is_speaking=False,
+                is_processing=False,
+                current_speaker=None
+            )
+
+    async def _on_relay_connection_change(self, connected: bool):
+        """Handle relay connection state changes - update UI with new context availability."""
+        status = "connected" if connected else "disconnected"
+        print(f"🔗 Relay {status}")
+
+        # Broadcast updated context list to UI so Discord channels show correct availability
+        if hasattr(self, 'ui_server') and self.context_manager:
+            from websocket_ui_server import UIMessage
+            context_list = self.get_context_list()
+            await self.ui_server.broadcast(UIMessage(
+                type="contexts_list",
+                data={"contexts": context_list}
+            ))
+            print(f"📋 Broadcasted updated context list (relay {status})")
+
+    async def set_context_mode(self, mode: str) -> bool:
+        """
+        Set the context mode (public API for UI/commands).
+
+        Args:
+            mode: "local" or "discord"
+
+        Returns:
+            True if mode switch succeeded.
+        """
+        if not self.relay_manager:
+            if mode == "discord":
+                print("❌ Cannot switch to DISCORD mode: relay not configured")
+                return False
+            return True  # Already in local mode
+
+        target_mode = ContextMode.DISCORD if mode == "discord" else ContextMode.LOCAL
+        return await self.relay_manager.set_mode(target_mode)
+
+    async def toggle_context_mode(self) -> str:
+        """
+        Toggle between LOCAL and DISCORD context modes.
+
+        Returns:
+            The new mode as a string ("local" or "discord").
+        """
+        if not self.relay_manager:
+            return "local"
+
+        new_mode = await self.relay_manager.toggle_mode()
+        return new_mode.value
+
+    def get_context_mode(self) -> str:
+        """
+        Get the current context mode.
+
+        Returns:
+            "local" or "discord"
+        """
+        if self.relay_manager:
+            return self.relay_manager.current_mode.value
+        return "local"
+
+    def is_discord_mode(self) -> bool:
+        """Check if currently in Discord context mode."""
+        return self.relay_manager is not None and self.relay_manager.is_discord_mode
+
+    async def _post_to_discord_and_stream_tts(self, text: str, speaker_name: Optional[str] = None, turn: Optional["ConversationTurn"] = None):
+        """
+        Post utterance to Discord webhook.
+
+        In DISCORD mode, we just post the transcript to Discord.
+        TTS streaming from relay will be handled separately when implemented.
+
+        Args:
+            text: The text to post.
+            speaker_name: Speaker name for webhook display.
+            turn: Optional ConversationTurn to store Discord message info in.
+        """
+        if not self.relay_manager:
+            return
+
+        # Post to Discord (no bot mention - director mode handles that)
+        result = await self.relay_manager.post_utterance(text=text, speaker_name=speaker_name)
+        if not result:
+            print("❌ Failed to post to Discord")
+            return
+
+        # Store Discord message info in the turn for later editing
+        if turn and result.get("message_id"):
+            if turn.metadata is None:
+                turn.metadata = {}
+            turn.metadata["discord_message_id"] = result.get("message_id")
+            turn.metadata["discord_webhook_id"] = result.get("webhook_id")
+            turn.metadata["discord_webhook_token"] = result.get("webhook_token")
+
+        print(f"✅ Posted to Discord (msg_id={result.get('message_id')}): {text[:50]}...")
+
+    async def edit_turn_content(self, turn_id: str, new_content: str) -> bool:
+        """
+        Edit a conversation turn's content and update Discord if applicable.
+
+        Args:
+            turn_id: The turn ID (e.g., "msg_5").
+            new_content: The new content for the turn.
+
+        Returns:
+            True if edit succeeded.
+        """
+        # Find the turn in history
+        turn = None
+        for t in self.state.conversation_history:
+            if t.id == turn_id:
+                turn = t
+                break
+
+        if not turn:
+            print(f"❌ Turn {turn_id} not found")
+            return False
+
+        old_content = turn.content
+        turn.content = new_content
+
+        # If this turn has Discord message info, edit it there too
+        if turn.metadata and turn.metadata.get("discord_message_id"):
+            if self.relay_manager and self.relay_manager._webhook_poster:
+                success = await self.relay_manager._webhook_poster.edit_webhook_message(
+                    message_id=turn.metadata["discord_message_id"],
+                    webhook_id=turn.metadata["discord_webhook_id"],
+                    webhook_token=turn.metadata["discord_webhook_token"],
+                    new_content=new_content
+                )
+                if success:
+                    print(f"✅ Edited Discord message {turn.metadata['discord_message_id']}")
+                else:
+                    print(f"⚠️ Failed to edit Discord message (local edit kept)")
+
+        # Broadcast update to UI
+        if hasattr(self, 'ui_server'):
+            from websocket_ui_server import UIMessage
+            await self.ui_server.broadcast(UIMessage(
+                type="turn_edited",
+                data={
+                    "turn_id": turn_id,
+                    "old_content": old_content,
+                    "new_content": new_content
+                }
+            ))
+
+        print(f"✅ Edited turn {turn_id}: {new_content[:50]}...")
+        return True
+
+    async def _initialize_discord_channel_contexts(self):
+        """Initialize Discord channel contexts from relay configuration.
+
+        Creates a context entry for each configured Discord channel,
+        allowing users to switch between file contexts and Discord channels
+        in the unified dropdown.
+        """
+        if not self.relay_manager or not self.context_manager:
+            return
+
+        relay_config = self.config.relay
+        if not relay_config or not relay_config.channels:
+            print("📋 No Discord channels configured for contexts")
+            return
+
+        print(f"📋 Initializing {len(relay_config.channels)} Discord channel context(s)...")
+
+        for channel_id in relay_config.channels:
+            # Try to get channel name from Discord API
+            channel_name = channel_id  # Default to ID if API fails
+
+            if self.relay_manager._webhook_poster:
+                channel_info = await self.relay_manager._webhook_poster.fetch_channel_info(channel_id)
+                if channel_info:
+                    channel_name = channel_info.get("name", channel_id)
+
+            # Create context for this channel
+            context_name = self.context_manager.create_discord_context(
+                channel_id=channel_id,
+                channel_name=channel_name,
+                history=None  # History will be fetched when context is activated
+            )
+
+            if context_name:
+                print(f"   📺 Created Discord context: {context_name} (#{channel_name})")
+
+        print(f"✅ Discord channel contexts initialized")
+
     async def _get_llm_output(self, speaker=None):
         await self._interrupt_llm_output()        
         self.llm_output_task = asyncio.create_task(self._get_llm_output_helper(speaker))
@@ -1912,6 +2401,16 @@ class UnifiedVoiceConversation:
                 is_edit=result.is_edit,
                 message_id=user_turn.id  # Use the assigned turn.id, not the STT result UUID
             )
+
+        # Check for Discord relay mode - if active, route to Discord instead of local LLM
+        if self.is_discord_mode():
+            print(f"🔗 Routing to Discord (relay mode): {result.text[:50]}...")
+            asyncio.create_task(self._post_to_discord_and_stream_tts(
+                text=result.text,
+                speaker_name=result.speaker_name,
+                turn=user_turn  # Pass turn to store Discord message info
+            ))
+            return
 
         # Get director mode (supports legacy director_enabled boolean)
         director_mode = getattr(self.config.conversation, 'director_mode', None)
@@ -4689,22 +5188,64 @@ class UnifiedVoiceConversation:
             return
     
     async def switch_context(self, context_name: str) -> bool:
-        """Switch to a different conversation context."""
+        """Switch to a different conversation context.
+
+        Automatically handles mode switching:
+        - Switching TO a Discord context: auto-enables Discord mode, fetches history
+        - Switching FROM a Discord context: auto-disables Discord mode
+        """
         print(f"🔄 UnifiedVoiceConversation.switch_context called with: {context_name}")
-        
+
         if not self.context_manager:
             print("❌ Context manager not available")
             return False
-        
+
         print(f"📋 Current active context: {self.context_manager.active_context_name}")
-        
+
+        # Get current and target context info
+        current_context = self.context_manager.get_active_context()
+        target_context = self.context_manager.contexts.get(context_name)
+
+        if not target_context:
+            print(f"❌ Target context '{context_name}' not found")
+            return False
+
+        # Check if we're switching to/from Discord context
+        was_discord = current_context and current_context.is_discord_context()
+        will_be_discord = target_context.is_discord_context()
+
+        # Handle mode switching for Discord contexts
+        if will_be_discord and not was_discord:
+            # Switching TO Discord context - enable Discord mode
+            print(f"🔄 Switching to Discord context - enabling Discord mode")
+            if self.relay_manager:
+                success = await self.set_context_mode("discord")
+                if not success:
+                    print("❌ Failed to enable Discord mode - relay may not be connected")
+                    return False
+
+                # Fetch Discord channel history if empty
+                if len(target_context.current_history) == 0 and target_context.config.channel_id:
+                    await self._fetch_discord_history_for_context(target_context)
+
+                # Start polling for new Discord messages
+                self._start_discord_polling()
+
+        elif not will_be_discord and was_discord:
+            # Switching FROM Discord context - disable Discord mode
+            print(f"🔄 Switching from Discord context - disabling Discord mode")
+            # Stop Discord message polling
+            self._stop_discord_polling()
+            if self.relay_manager:
+                await self.set_context_mode("local")
+
         # Switch context
         if self.context_manager.switch_context(context_name):
             print(f"✅ Context manager switched to: {context_name}")
-            
+
             # Sync history from new context
             self._sync_history_from_context()
-            
+
             # Log the context switch
             switch_turn = ConversationTurn(
                 role="system",
@@ -4713,12 +5254,218 @@ class UnifiedVoiceConversation:
                 status="completed"
             )
             self._log_conversation_turn("system", switch_turn.content)
-            
+
+            # Broadcast context mode change to UI
+            if hasattr(self, 'ui_server'):
+                mode = "discord" if will_be_discord else "local"
+                await self.ui_server.broadcast(UIMessage(
+                    type="context_mode_change",
+                    data={"mode": mode}
+                ))
+
+            # Save global settings to persist current context
+            self._save_global_settings()
+
             return True
-        
+
         print(f"❌ Context manager failed to switch to: {context_name}")
         return False
-    
+
+    async def _fetch_discord_history_for_context(self, context: 'ConversationContext'):
+        """Fetch Discord channel history and populate context."""
+        if not self.relay_manager or not self.relay_manager._webhook_poster:
+            print("⚠️ Cannot fetch Discord history - webhook poster not available")
+            return
+
+        channel_id = context.config.channel_id
+        if not channel_id:
+            return
+
+        print(f"📥 Fetching Discord history for channel {channel_id}...")
+
+        from discord_webhook import discord_message_to_turn
+
+        # Fetch messages from Discord API
+        messages = await self.relay_manager._webhook_poster.fetch_channel_messages(channel_id, limit=100)
+
+        if not messages:
+            print("⚠️ No messages fetched from Discord channel")
+            return
+
+        # Get bot IDs for role detection
+        relay_config = self.config.relay
+        bot_ids = [bot.user_id for bot in relay_config.bots.values()] if relay_config else []
+
+        # Convert to ConversationTurns (messages are most recent first, reverse them)
+        turns = []
+        for msg in reversed(messages):
+            turn_data = discord_message_to_turn(msg, bot_ids)
+
+            # Skip empty messages
+            if not turn_data["content"].strip():
+                continue
+
+            turn = ConversationTurn(
+                role=turn_data["role"],
+                content=turn_data["content"],
+                timestamp=turn_data["timestamp"],
+                status="completed",
+                speaker_name=turn_data["speaker_name"],
+                metadata=turn_data["metadata"]
+            )
+            turns.append(turn)
+
+        # Populate context history
+        context.original_history = turns
+        context.current_history = turns.copy()
+        print(f"✅ Loaded {len(turns)} messages from Discord channel")
+
+        # Store the last seen message ID for polling
+        if messages:
+            # messages[0] is the most recent
+            self._last_seen_message_ids[channel_id] = messages[0]["id"]
+            print(f"📌 Last seen message ID for channel {channel_id}: {messages[0]['id']}")
+
+    def _start_discord_polling(self):
+        """Start polling for new Discord messages."""
+        if self._discord_poll_task and not self._discord_poll_task.done():
+            print("📡 Discord polling already running")
+            return
+
+        self._discord_poll_task = asyncio.create_task(self._poll_discord_messages())
+        print(f"📡 Started Discord message polling (every {self._discord_poll_interval}s)")
+
+    def _stop_discord_polling(self):
+        """Stop polling for Discord messages."""
+        if self._discord_poll_task and not self._discord_poll_task.done():
+            self._discord_poll_task.cancel()
+            print("📡 Stopped Discord message polling")
+        self._discord_poll_task = None
+
+    async def _poll_discord_messages(self):
+        """Background task to poll for new Discord messages."""
+        try:
+            while True:
+                await asyncio.sleep(self._discord_poll_interval)
+
+                # Only poll if in Discord mode with an active Discord context
+                if not self.relay_manager or not self.relay_manager.is_discord_mode:
+                    continue
+
+                if not self.context_manager:
+                    continue
+
+                active_context = self.context_manager.get_active_context()
+                if not active_context or not active_context.is_discord_context():
+                    continue
+
+                channel_id = active_context.config.channel_id
+                if not channel_id:
+                    continue
+
+                await self._fetch_new_discord_messages(channel_id, active_context)
+
+        except asyncio.CancelledError:
+            print("📡 Discord polling task cancelled")
+        except Exception as e:
+            print(f"❌ Discord polling error: {e}")
+            import traceback
+            traceback.print_exc()
+
+    async def _fetch_new_discord_messages(self, channel_id: str, context: 'ConversationContext'):
+        """Fetch and process new messages from Discord channel."""
+        if not self.relay_manager or not self.relay_manager._webhook_poster:
+            return
+
+        last_seen_id = self._last_seen_message_ids.get(channel_id)
+        if not last_seen_id:
+            # No last seen ID - skip polling until we have a baseline
+            return
+
+        # Fetch messages after the last seen one
+        messages = await self.relay_manager._webhook_poster.fetch_channel_messages(
+            channel_id, limit=50, after=last_seen_id
+        )
+
+        if not messages:
+            return
+
+        print(f"📥 Polled {len(messages)} new message(s) from Discord")
+
+        from discord_webhook import discord_message_to_turn
+
+        # Get bot IDs for role detection
+        relay_config = self.config.relay
+        bot_ids = [bot.user_id for bot in relay_config.bots.values()] if relay_config else []
+
+        # Get our webhook IDs to filter our own posts
+        our_webhook_ids = self.relay_manager._webhook_poster.get_our_webhook_ids()
+
+        # Messages are returned newest-first, reverse for chronological order
+        for msg in reversed(messages):
+            turn_data = discord_message_to_turn(msg, bot_ids)
+
+            # Skip empty messages
+            if not turn_data["content"].strip():
+                continue
+
+            # Skip messages posted via OUR webhook (these are our own posts)
+            msg_webhook_id = msg.get("webhook_id")
+            if msg_webhook_id and msg_webhook_id in our_webhook_ids:
+                print(f"📥 Skipping our webhook message: {turn_data['content'][:50]}...")
+                continue
+
+            # Skip messages we already received via TTS callback
+            author_id = msg.get("author", {}).get("id", "")
+            if author_id in bot_ids:
+                content_hash = hash((turn_data["speaker_name"], turn_data["content"].strip()[:200]))
+                if content_hash in self._tts_received_hashes:
+                    print(f"📥 Skipping (already from TTS): {turn_data['speaker_name']}")
+                    continue
+
+            # Create turn for context
+            from context_manager import ConversationTurn as ContextTurn
+            ctx_turn = ContextTurn(
+                role=turn_data["role"],
+                content=turn_data["content"],
+                timestamp=turn_data["timestamp"],
+                status="completed",
+                speaker_name=turn_data["speaker_name"],
+                metadata=turn_data["metadata"]
+            )
+
+            # Add to context history
+            context.add_turn(ctx_turn)
+
+            # Create turn for main history
+            main_turn = ConversationTurn(
+                role=turn_data["role"],
+                content=turn_data["content"],
+                timestamp=turn_data["timestamp"],
+                status="completed",
+                speaker_name=turn_data["speaker_name"],
+                metadata=turn_data["metadata"]
+            )
+
+            # Add to main conversation history
+            self._add_turn_to_history(main_turn)
+
+            # Broadcast to UI
+            if hasattr(self, 'ui_server'):
+                message_id = f"discord_{msg['id']}"
+                await self.ui_server.broadcast_ai_stream(
+                    speaker=turn_data["speaker_name"],
+                    text=turn_data["content"],
+                    is_complete=True,
+                    session_id=message_id,
+                    message_id=message_id
+                )
+
+            print(f"📥 Added Discord message from {turn_data['speaker_name']}: {turn_data['content'][:50]}...")
+
+        # Update last seen message ID (messages[0] is newest)
+        self._last_seen_message_ids[channel_id] = messages[0]["id"]
+
     async def reset_context(self):
         """Reset current context to original history."""
         if not self.context_manager:
@@ -4741,10 +5488,12 @@ class UnifiedVoiceConversation:
         self._log_conversation_turn("system", reset_turn.content)
     
     def get_context_list(self) -> List[Dict[str, Any]]:
-        """Get list of available contexts."""
+        """Get list of available contexts with relay connection status."""
         if not self.context_manager:
             return []
-        return self.context_manager.get_context_list()
+        # Pass relay connection status so Discord contexts show availability
+        relay_connected = self.relay_manager.is_relay_connected if self.relay_manager else False
+        return self.context_manager.get_context_list(relay_connected=relay_connected)
     
     async def cleanup(self):
         """Clean up all resources."""
@@ -4753,7 +5502,10 @@ class UnifiedVoiceConversation:
             await self.stop_conversation()
         except Exception as e:
             print(f"Error stopping conversation: {e}")
-        
+
+        # Stop Discord message polling
+        self._stop_discord_polling()
+
         # Stop thinking sound early to prevent conflicts
         try:
             await self.thinking_sound.interrupt()  # Force stop any playing sound
@@ -4817,15 +5569,21 @@ class UnifiedVoiceConversation:
 
 async def main():
     """Main function for the unified voice conversation system."""
+    import argparse
+    parser = argparse.ArgumentParser(description='Unified Voice Conversation System')
+    parser.add_argument('--config', type=str, help='Path to config YAML file')
+    parser.add_argument('--preset', type=str, help='Preset name to apply')
+    args = parser.parse_args()
+
     print("🎙️ Unified Voice Conversation System (YAML Config)")
     print("==================================================")
-    
+
     conversation = None
-    
+
     try:
         # Load configuration from YAML
         print("📁 Loading configuration...")
-        config = load_config()
+        config = load_config(args.config, args.preset)
         print("✅ Configuration loaded successfully!")
         
     except FileNotFoundError as e:

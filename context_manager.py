@@ -39,6 +39,8 @@ class ContextConfig:
     metadata: Optional[Dict[str, Any]] = None
     character_histories: Optional[Dict[str, str]] = None  # Maps character name to their history file
     system_active_message: Optional[str] = None  # Message to inject after reset point when context becomes active
+    context_type: str = "file"  # "file" or "discord"
+    channel_id: Optional[str] = None  # For Discord contexts
     
 
 class ConversationContext:
@@ -66,7 +68,11 @@ class ConversationContext:
         # Flag to indicate system_active_message should be injected
         # Set to True when context is first loaded or reset
         self.needs_system_message = True
-        
+
+    def is_discord_context(self) -> bool:
+        """Check if this is a Discord channel context."""
+        return self.config.context_type == "discord"
+
     def load_state(self) -> bool:
         """Load persistent state from file."""
         # Preserve character histories that were loaded
@@ -533,17 +539,29 @@ class ContextManager:
             self.save_all_states()
             raise
     
-    def get_context_list(self) -> List[Dict[str, Any]]:
-        """Get list of all contexts with their metadata."""
+    def get_context_list(self, relay_connected: bool = False) -> List[Dict[str, Any]]:
+        """Get list of all contexts with their metadata.
+
+        Args:
+            relay_connected: Whether the Discord relay is currently connected.
+                           Discord contexts are marked unavailable when relay is disconnected.
+        """
         context_list = []
         for name, context in self.contexts.items():
+            is_discord = context.is_discord_context()
+            # Discord contexts are only available when relay is connected
+            available = not is_discord or relay_connected
+
             context_info = {
                 'name': name,
                 'description': context.config.description,
                 'is_active': name == self.active_context_name,
                 'is_modified': context.is_modified,
                 'turn_count': len(context.current_history),
-                'last_save': context.last_save_time.isoformat() if context.last_save_time else None
+                'last_save': context.last_save_time.isoformat() if context.last_save_time else None,
+                'context_type': context.config.context_type,
+                'channel_id': context.config.channel_id,
+                'available': available
             }
             context_list.append(context_info)
         return context_list
@@ -763,3 +781,145 @@ class ContextManager:
 
         print(f"🗑️ Deleted dynamic context '{context_name}'")
         return True
+
+    def create_discord_context(
+        self,
+        channel_id: str,
+        channel_name: str,
+        history: Optional[List[ConversationTurn]] = None
+    ) -> Optional[str]:
+        """Create a Discord channel context.
+
+        Args:
+            channel_id: Discord channel ID
+            channel_name: Human-readable channel name
+            history: Optional list of ConversationTurns to populate the context
+
+        Returns:
+            Name of new context, or None if failed
+        """
+        # Generate unique context name
+        context_name = f"discord_{channel_name}"
+        if context_name in self.contexts:
+            # Already exists, just return the name
+            print(f"📋 Discord context '{context_name}' already exists")
+            return context_name
+
+        # Create context config
+        config = ContextConfig(
+            name=context_name,
+            history_file='',  # Discord contexts don't have history files
+            description=f"Discord channel: #{channel_name}",
+            metadata={'is_discord': True, 'channel_id': channel_id},
+            character_histories=None,
+            context_type="discord",
+            channel_id=channel_id
+        )
+
+        # Create new context
+        new_context = ConversationContext(config, self.state_dir)
+
+        # Populate history if provided
+        if history:
+            new_context.original_history = history.copy()
+            new_context.current_history = history.copy()
+        else:
+            new_context.original_history = []
+            new_context.current_history = []
+
+        new_context.metadata = config.metadata
+
+        # Add to contexts
+        self.contexts[context_name] = new_context
+
+        print(f"✅ Created Discord context '{context_name}' with {len(new_context.current_history)} messages")
+        return context_name
+
+    def get_discord_context_for_channel(self, channel_id: str) -> Optional['ConversationContext']:
+        """Get the Discord context for a specific channel ID, if it exists."""
+        for context in self.contexts.values():
+            if context.config.channel_id == channel_id:
+                return context
+        return None
+
+    def save_discord_context_as_file(
+        self,
+        discord_context_name: str,
+        new_name: Optional[str] = None
+    ) -> Optional[str]:
+        """Save a Discord context as a local file context.
+
+        This creates a new "file" type context from the current state of a Discord context,
+        allowing users to preserve the conversation locally.
+
+        Args:
+            discord_context_name: Name of the Discord context to save
+            new_name: Optional custom name for the new context
+
+        Returns:
+            Name of the new file context, or None if failed
+        """
+        if discord_context_name not in self.contexts:
+            print(f"❌ Discord context '{discord_context_name}' not found")
+            return None
+
+        source_context = self.contexts[discord_context_name]
+
+        if source_context.config.context_type != "discord":
+            print(f"❌ '{discord_context_name}' is not a Discord context")
+            return None
+
+        # Generate new name
+        if new_name is None:
+            base_name = discord_context_name.replace("discord_", "saved_")
+            new_name = self._generate_unique_name(base_name)
+
+        if new_name in self.contexts:
+            print(f"❌ Context '{new_name}' already exists")
+            return None
+
+        # Create new context config (as file type)
+        config = ContextConfig(
+            name=new_name,
+            history_file='',  # Dynamic context without file
+            description=f"Saved from Discord channel at {datetime.now().strftime('%Y-%m-%d %H:%M')}",
+            metadata={
+                'is_dynamic': True,
+                'saved_from_discord': discord_context_name,
+                'saved_at': datetime.now().isoformat()
+            },
+            character_histories=None,
+            context_type="file"  # This is now a file context
+        )
+
+        # Create new context
+        new_context = ConversationContext(config, self.state_dir)
+
+        # Copy current history as BOTH original and current
+        new_context.original_history = [
+            ConversationTurn(
+                role=turn.role,
+                content=turn.content,
+                timestamp=turn.timestamp,
+                status=turn.status,
+                character=turn.character,
+                speaker_id=turn.speaker_id,
+                speaker_name=turn.speaker_name,
+                metadata=turn.metadata.copy() if turn.metadata else {}
+            )
+            for turn in source_context.current_history
+        ]
+        new_context.current_history = new_context.original_history.copy()
+        new_context.metadata = config.metadata
+
+        # Add to contexts
+        self.contexts[new_name] = new_context
+
+        # Save state
+        new_context.save_state()
+
+        # Save dynamic contexts registry
+        self._save_dynamic_contexts()
+
+        print(f"✅ Saved Discord context '{discord_context_name}' as '{new_name}' ({len(new_context.current_history)} turns)")
+        return new_name
