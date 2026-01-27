@@ -1622,47 +1622,7 @@ class UnifiedVoiceConversation:
         # Check if we're in prefill format to generate stop sequences
         stop_sequences = None
         if self.config.conversation.conversation_mode == "prefill":
-            stop_sequences = []
-
-            # EOT token - highest priority (prevents participant simulation)
-            stop_sequences.append(get_eot_token())
-
-            # Add all character names as stop sequences
-            for char_name in self.character_manager.characters.keys():
-                stop_sequences.append(f"\n\n{char_name}:")
-                # Also add prefill names if different
-                char_config_temp = self.character_manager.get_character_config(char_name)
-                if char_config_temp and char_config_temp.prefill_name and char_config_temp.prefill_name != char_name:
-                    stop_sequences.append(f"\n\n{char_config_temp.prefill_name}:")
-            
-            # Add human names
-            if hasattr(self.config.conversation, 'prefill_participants'):
-                human_name = self.config.conversation.prefill_participants[0]
-                stop_sequences.append(f"\n\n{human_name}:")
-            
-            # Add any detected speakers
-            if hasattr(self, 'detected_speakers') and self.detected_speakers:
-                for speaker in self.detected_speakers:
-                    speaker_stop = f"\n\n{speaker}:"
-                    if speaker_stop not in stop_sequences:
-                        stop_sequences.append(speaker_stop)
-            
-            # Add System: to stop sequences
-            stop_sequences.append("\n\nSystem:")
-            stop_sequences.append("\n\nA:")
-            
-            # Add User 1 through User 10
-            for i in range(1, 11):
-                stop_sequences.append(f"\n\nUser {i}:")
-
-            # Add interrupted marker
-            stop_sequences.append("[Interrupted by user]")
-
-            # Add tool stop sequences if this character has tools enabled
-            stop_sequences.extend(self._get_tool_stop_sequences_for_character(character_config))
-
-            # Remove duplicates while preserving order
-            stop_sequences = list(dict.fromkeys(stop_sequences))
+            stop_sequences = self._build_stop_sequences(character_config)
         # Log the request
         request_filename = self._log_llm_request(
             messages,
@@ -2696,47 +2656,7 @@ class UnifiedVoiceConversation:
             # Check if we're in prefill format to generate stop sequences
             stop_sequences = None
             if self.config.conversation.conversation_mode == "prefill":
-                stop_sequences = []
-
-                # EOT token - highest priority (prevents participant simulation)
-                stop_sequences.append(get_eot_token())
-
-                # Add all character names as stop sequences
-                for char_name in self.character_manager.characters.keys():
-                    stop_sequences.append(f"\n\n{char_name}:")
-                    # Also add prefill names if different
-                    char_config_temp = self.character_manager.get_character_config(char_name)
-                    if char_config_temp and char_config_temp.prefill_name and char_config_temp.prefill_name != char_name:
-                        stop_sequences.append(f"\n\n{char_config_temp.prefill_name}:")
-
-                # Add human names
-                if hasattr(self.config.conversation, 'prefill_participants'):
-                    human_name = self.config.conversation.prefill_participants[0]
-                    stop_sequences.append(f"\n\n{human_name}:")
-
-                # Add any detected speakers
-                if hasattr(self, 'detected_speakers') and self.detected_speakers:
-                    for speaker in self.detected_speakers:
-                        speaker_stop = f"\n\n{speaker}:"
-                        if speaker_stop not in stop_sequences:
-                            stop_sequences.append(speaker_stop)
-                
-                # Add System: to stop sequences
-                stop_sequences.append("\n\nSystem:")
-                stop_sequences.append("\n\nA:")
-                
-                # Add User 1 through User 10
-                for i in range(1, 11):
-                    stop_sequences.append(f"\n\nUser {i}:")
-
-                # Add interrupted marker
-                stop_sequences.append("[Interrupted by user]")
-
-                # Add tool stop sequences if this character has tools enabled
-                stop_sequences.extend(self._get_tool_stop_sequences_for_character(character_config))
-
-                # Remove duplicates while preserving order
-                stop_sequences = list(dict.fromkeys(stop_sequences))
+                stop_sequences = self._build_stop_sequences(character_config)
 
             # Log the request
             request_filename = self._log_llm_request(
@@ -3297,47 +3217,9 @@ class UnifiedVoiceConversation:
             # Generate stop sequences for multi-character conversations
             stop_sequences = []
             if is_prefill_format:
-                # EOT token - highest priority (prevents participant simulation)
-                stop_sequences.append(get_eot_token())
+                stop_sequences = self._build_stop_sequences(character_config)
+                print(f"🛑 Character using stop sequences ({sum(len(s) for s in stop_sequences)} chars): {stop_sequences}")
 
-                # Add all character names as stop sequences
-                for char_name in self.character_manager.characters.keys():
-                    stop_sequences.append(f"\n\n{char_name}:")
-                    # Also add prefill names if different
-                    char_config = self.character_manager.get_character_config(char_name)
-                    if char_config and char_config.prefill_name and char_config.prefill_name != char_name:
-                        stop_sequences.append(f"\n\n{char_config.prefill_name}:")
-
-                # Add human names
-                if hasattr(self.config.conversation, 'prefill_participants'):
-                    human_name = self.config.conversation.prefill_participants[0]
-                    stop_sequences.append(f"\n\n{human_name}:")
-                
-                # Add any detected speakers
-                if hasattr(self, 'detected_speakers') and self.detected_speakers:
-                    for speaker in self.detected_speakers:
-                        speaker_stop = f"\n\n{speaker}:"
-                        if speaker_stop not in stop_sequences:
-                            stop_sequences.append(speaker_stop)
-                
-                # Add System: to stop sequences
-                stop_sequences.append("\n\nSystem:")
-                stop_sequences.append("\n\nA:")
-                
-                # Add User 1 through User 10
-                for i in range(1, 11):
-                    stop_sequences.append(f"\n\nUser {i}:")
-                
-                # Add interrupted marker
-                stop_sequences.append("[Interrupted by user]")
-
-                # Add tool stop sequences if this character has tools enabled
-                stop_sequences.extend(self._get_tool_stop_sequences_for_character(character_config))
-
-                # Remove duplicates while preserving order
-                stop_sequences = list(dict.fromkeys(stop_sequences))
-                print(f"🛑 Character using stop sequences: {stop_sequences}")
-            
             response = await client.messages.create(
                 model=character_config.llm_model,
                 messages=anthropic_messages,
@@ -3621,36 +3503,8 @@ class UnifiedVoiceConversation:
             # Generate stop sequences for multi-character conversations
             stop_sequences = []
             if is_prefill_format:
-                # EOT token - highest priority (prevents participant simulation)
-                stop_sequences.append(get_eot_token())
-
-                # Add all character names as stop sequences
-                for char_name in self.character_manager.characters.keys():
-                    stop_sequences.append(f"\n\n{char_name}:")
-                    # Also add prefill names if different
-                    char_config = self.character_manager.get_character_config(char_name)
-                    if char_config and char_config.prefill_name and char_config.prefill_name != char_name:
-                        stop_sequences.append(f"\n\n{char_config.prefill_name}:")
-
-                # Add human names
-                if hasattr(self.config.conversation, 'prefill_participants'):
-                    human_name = self.config.conversation.prefill_participants[0]
-                    stop_sequences.append(f"\n\n{human_name}:")
-                
-                # Add any detected speakers
-                if hasattr(self, 'detected_speakers') and self.detected_speakers:
-                    for speaker in self.detected_speakers:
-                        speaker_stop = f"\n\n{speaker}:"
-                        if speaker_stop not in stop_sequences:
-                            stop_sequences.append(speaker_stop)
-                
-                # Add default system stop sequence
-                stop_sequences.append("\n\nSystem:")
-                stop_sequences.append("\n\nA:")
-                
-                # Remove duplicates while preserving order
-                stop_sequences = list(dict.fromkeys(stop_sequences))
-                print(f"🛑 Character using stop sequences: {stop_sequences}")
+                stop_sequences = self._build_stop_sequences(character_config, include_user_stops=False, include_tool_stops=False)
+                print(f"🛑 Character using stop sequences ({sum(len(s) for s in stop_sequences)} chars): {stop_sequences}")
             
             # For Bedrock, model names start with "anthropic." or "us.anthropic." (cross-region)
             model_name = character_config.llm_model
@@ -4037,6 +3891,74 @@ class UnifiedVoiceConversation:
             # Include both </invoke> (model's natural stop point) and </function_calls>
             return ['</invoke>', get_tool_stop_sequence()]
         return []
+
+    def _build_stop_sequences(self, character_config, include_user_stops=True, include_tool_stops=True) -> list:
+        """Build stop sequences for prefill mode, filtering garbage and enforcing API length limit.
+
+        The Anthropic API has a 2,500 total character limit for stop_sequences.
+        Detected speakers can contain garbage entries from conversation parsing,
+        so we filter them to only include clean names.
+        """
+        MAX_TOTAL_LENGTH = 2400  # API limit is 2500, leave margin
+
+        stop_sequences = []
+
+        # EOT token - highest priority (prevents participant simulation)
+        stop_sequences.append(get_eot_token())
+
+        # Add all character names as stop sequences
+        for char_name in self.character_manager.characters.keys():
+            stop_sequences.append(f"\n\n{char_name}:")
+            # Also add prefill names if different
+            char_config_temp = self.character_manager.get_character_config(char_name)
+            if char_config_temp and char_config_temp.prefill_name and char_config_temp.prefill_name != char_name:
+                stop_sequences.append(f"\n\n{char_config_temp.prefill_name}:")
+
+        # Add human names
+        if hasattr(self.config.conversation, 'prefill_participants'):
+            human_name = self.config.conversation.prefill_participants[0]
+            stop_sequences.append(f"\n\n{human_name}:")
+
+        # Add detected speakers - FILTERED to avoid garbage entries
+        if hasattr(self, 'detected_speakers') and self.detected_speakers:
+            added_speakers = 0
+            for speaker in self.detected_speakers:
+                if added_speakers >= 20:  # Cap detected speakers
+                    break
+                # Skip garbage: must be non-empty, short, no newlines
+                if not speaker or len(speaker) > 30 or '\n' in speaker or '\r' in speaker:
+                    continue
+                # Must be mostly alphanumeric/spaces/dots (valid name characters)
+                if not all(c.isalnum() or c in ' .-_\'' for c in speaker):
+                    continue
+                speaker_stop = f"\n\n{speaker}:"
+                if speaker_stop not in stop_sequences:
+                    stop_sequences.append(speaker_stop)
+                    added_speakers += 1
+
+        # Add System stop
+        stop_sequences.append("\n\nSystem:")
+        stop_sequences.append("\n\nA:")
+
+        if include_user_stops:
+            for i in range(1, 11):
+                stop_sequences.append(f"\n\nUser {i}:")
+            stop_sequences.append("[Interrupted by user]")
+
+        if include_tool_stops:
+            stop_sequences.extend(self._get_tool_stop_sequences_for_character(character_config))
+
+        # Remove duplicates while preserving order
+        stop_sequences = list(dict.fromkeys(stop_sequences))
+
+        # Enforce total length limit - remove from end (detected speakers / extras)
+        # but always keep EOT token (first entry)
+        total_length = sum(len(s) for s in stop_sequences)
+        while total_length > MAX_TOTAL_LENGTH and len(stop_sequences) > 1:
+            removed = stop_sequences.pop(-1)
+            total_length -= len(removed)
+
+        return stop_sequences
 
     def _character_has_tools(self, character_config) -> bool:
         """Check if a character has tools enabled."""
