@@ -123,7 +123,7 @@ class AsyncSTTElevenLabs:
         # Batch diarization (optional) - uses Scribe v2 batch API for proper diarization
         self.diarization_manager = None
         batch_diarization_config = getattr(config, 'batch_diarization', None)
-        if batch_diarization_config and BATCH_DIARIZATION_AVAILABLE:
+        if batch_diarization_config and batch_diarization_config.get('enabled', False) and BATCH_DIARIZATION_AVAILABLE:
             try:
                 self.diarization_manager = DiarizationManager(
                     api_key=config.api_key,
