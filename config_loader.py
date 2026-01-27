@@ -57,6 +57,7 @@ class ConversationConfig:
     llm_model: str = "chatgpt-4o-latest"
     conversation_mode: str = "chat"  # chat or prefill
     max_tokens: int = 300
+    max_context_tokens: int = 100000  # Rolling context window - truncate older messages to stay under this limit
     system_prompt: str = "You are a helpful AI assistant in a voice conversation. Give natural, conversational responses that work well when spoken aloud. Keep responses concise but engaging."
     
     # Prefill mode settings

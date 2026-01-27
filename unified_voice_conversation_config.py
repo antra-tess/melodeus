@@ -1619,6 +1619,9 @@ class UnifiedVoiceConversation:
                     elif isinstance(part, str):
                         content[i] = self._strip_tool_calls_from_content(part, allowed_tools)
 
+        # Truncate messages to stay within context window
+        messages = self._truncate_messages_to_token_limit(messages)
+
         # Check if we're in prefill format to generate stop sequences
         stop_sequences = None
         if self.config.conversation.conversation_mode == "prefill":
@@ -2652,7 +2655,10 @@ class UnifiedVoiceConversation:
                     self._get_conversation_history_for_character(),
                     context_char_histories
                 )
-            
+
+            # Truncate messages to stay within context window
+            messages = self._truncate_messages_to_token_limit(messages)
+
             # Check if we're in prefill format to generate stop sequences
             stop_sequences = None
             if self.config.conversation.conversation_mode == "prefill":
@@ -3959,6 +3965,137 @@ class UnifiedVoiceConversation:
             total_length -= len(removed)
 
         return stop_sequences
+
+    def _estimate_tokens(self, text: str) -> int:
+        """Rough token estimate: ~4 characters per token for English text."""
+        if not text:
+            return 0
+        return len(text) // 4
+
+    def _estimate_messages_tokens(self, messages: list) -> int:
+        """Estimate total tokens across all messages."""
+        total = 0
+        for msg in messages:
+            content = msg.get("content", "")
+            if isinstance(content, str):
+                total += self._estimate_tokens(content)
+            elif isinstance(content, list):
+                # Multi-part content (images, text blocks)
+                for part in content:
+                    if isinstance(part, dict) and part.get("type") == "text":
+                        total += self._estimate_tokens(part.get("text", ""))
+                    elif isinstance(part, dict) and part.get("type") == "image":
+                        total += 1600  # Rough estimate for image tokens
+                    elif isinstance(part, str):
+                        total += self._estimate_tokens(part)
+            # Add overhead per message
+            total += 10
+        return total
+
+    def _truncate_messages_to_token_limit(self, messages: list) -> list:
+        """Truncate messages to fit within max_context_tokens.
+
+        For prefill mode (system + user + assistant): trims the assistant
+        message content from the beginning at <|eot|> boundaries.
+
+        For chat mode: removes oldest non-system messages from the front.
+        """
+        max_tokens = self.config.conversation.max_context_tokens
+        if max_tokens <= 0:
+            return messages
+
+        estimated = self._estimate_messages_tokens(messages)
+        if estimated <= max_tokens:
+            return messages
+
+        print(f"⚠️ Context too long (~{estimated} tokens, limit {max_tokens}). Truncating...")
+
+        is_prefill = self.config.conversation.conversation_mode == "prefill"
+
+        if is_prefill:
+            return self._truncate_prefill_messages(messages, max_tokens)
+        else:
+            return self._truncate_chat_messages(messages, max_tokens)
+
+    def _truncate_prefill_messages(self, messages: list, max_tokens: int) -> list:
+        """Truncate prefill format: trim assistant content from the beginning at <|eot|> boundaries."""
+        # Find the assistant message (usually the last one)
+        assistant_idx = None
+        for i, msg in enumerate(messages):
+            if msg.get("role") == "assistant":
+                assistant_idx = i
+                break
+
+        if assistant_idx is None:
+            return messages  # No assistant message to truncate
+
+        messages = [dict(m) for m in messages]  # Shallow copy
+        assistant_content = messages[assistant_idx].get("content", "")
+        if not isinstance(assistant_content, str):
+            return messages
+
+        # Calculate how many tokens we need from non-assistant messages
+        non_assistant_tokens = sum(
+            self._estimate_tokens(m.get("content", "") if isinstance(m.get("content"), str) else "")
+            + 10
+            for i, m in enumerate(messages) if i != assistant_idx
+        )
+
+        # Budget for assistant content
+        assistant_budget = max_tokens - non_assistant_tokens
+        if assistant_budget <= 0:
+            assistant_budget = max_tokens // 2  # At least half the budget
+
+        current_tokens = self._estimate_tokens(assistant_content)
+        if current_tokens <= assistant_budget:
+            return messages
+
+        # Need to trim from the beginning. Find <|eot|> boundaries to cut at.
+        eot_marker = "<|eot|>"
+        target_chars = assistant_budget * 4  # Convert back to chars
+
+        # Cut from the beginning: find the right <|eot|> boundary
+        cut_point = len(assistant_content) - target_chars
+        if cut_point <= 0:
+            return messages
+
+        # Find the next <|eot|>\n\n after the cut point to get a clean boundary
+        next_eot = assistant_content.find(eot_marker, cut_point)
+        if next_eot != -1:
+            # Skip past the eot marker and any following newlines
+            cut_point = next_eot + len(eot_marker)
+            while cut_point < len(assistant_content) and assistant_content[cut_point] == '\n':
+                cut_point += 1
+        else:
+            # No eot marker found after cut point, just cut at paragraph
+            next_para = assistant_content.find('\n\n', cut_point)
+            if next_para != -1:
+                cut_point = next_para + 2
+
+        trimmed_content = assistant_content[cut_point:]
+        messages[assistant_idx]["content"] = trimmed_content
+
+        new_tokens = self._estimate_messages_tokens(messages)
+        print(f"✂️ Prefill truncated: removed ~{(current_tokens - self._estimate_tokens(trimmed_content))} tokens from start. Now ~{new_tokens} tokens.")
+        return messages
+
+    def _truncate_chat_messages(self, messages: list, max_tokens: int) -> list:
+        """Truncate chat format: remove oldest non-system messages."""
+        # Keep system messages, remove oldest user/assistant pairs
+        system_msgs = [m for m in messages if m.get("role") == "system"]
+        non_system = [m for m in messages if m.get("role") != "system"]
+
+        system_tokens = self._estimate_messages_tokens(system_msgs)
+        budget = max_tokens - system_tokens
+
+        # Remove from the front until we fit
+        while non_system and self._estimate_messages_tokens(non_system) > budget:
+            non_system.pop(0)
+
+        result = system_msgs + non_system
+        new_tokens = self._estimate_messages_tokens(result)
+        print(f"✂️ Chat truncated to {len(non_system)} messages (~{new_tokens} tokens)")
+        return result
 
     def _character_has_tools(self, character_config) -> bool:
         """Check if a character has tools enabled."""
