@@ -295,13 +295,18 @@ def handle_code_update(webhook_url: str, last_sha: str) -> str:
         print(f"\n📌 Tag push: {ref} - skipping restart")
         return remote_sha  # Mark as handled
 
+    # Skip pushes to non-main branches - they don't affect the deployed code
+    if ref and ref != 'refs/heads/main':
+        print(f"\n📌 Non-main branch push: {ref} ({remote_sha[:7]}) - skipping")
+        return remote_sha  # Mark as handled to prevent loop
+
     print(f"\n🆕 New code push detected: {remote_sha[:7]}")
     print(f"   Pusher: {data.get('pusher')}")
     print(f"   Ref: {ref}")
 
     old_sha = get_current_sha(MELODEUS_DIR)
     if not pull_changes(MELODEUS_DIR):
-        return last_sha
+        return remote_sha  # Still mark as seen to prevent retry loop
 
     new_sha = get_current_sha(MELODEUS_DIR)
 
@@ -322,7 +327,7 @@ def handle_code_update(webhook_url: str, last_sha: str) -> str:
         restart_service("melodeus")
 
     print(f"✅ Code deploy complete!\n")
-    return new_sha
+    return remote_sha  # Track relay SHA to prevent reprocessing
 
 
 def handle_config_update(webhook_url: str, last_sha: str) -> str:
@@ -366,12 +371,18 @@ def handle_config_update(webhook_url: str, last_sha: str) -> str:
     if not remote_sha or remote_sha == last_sha:
         return last_sha
 
+    # Skip pushes to non-main branches
+    ref = data.get('ref', '')
+    if ref and ref != 'refs/heads/main':
+        print(f"\n📌 Non-main config branch push: {ref} ({remote_sha[:7]}) - skipping")
+        return remote_sha
+
     print(f"\n🆕 New config push detected: {remote_sha[:7]}")
     print(f"   Pusher: {data.get('pusher')}")
 
     old_sha = get_current_sha(CONFIG_DIR)
     if not pull_changes(CONFIG_DIR):
-        return last_sha
+        return remote_sha  # Still mark as seen to prevent retry loop
 
     new_sha = get_current_sha(CONFIG_DIR)
     
@@ -390,7 +401,7 @@ def handle_config_update(webhook_url: str, last_sha: str) -> str:
         restart_service("melodeus")
 
     print(f"✅ Config deploy complete!\n")
-    return new_sha
+    return remote_sha  # Track relay SHA to prevent reprocessing
 
 
 def main():
